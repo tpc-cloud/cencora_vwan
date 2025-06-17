@@ -24,6 +24,7 @@ env:
   ARM_SUBSCRIPTION_ID: "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
   ARM_TENANT_ID: "${{ secrets.AZURE_TENANT_ID }}"
   TF_WORKSPACE: "default"
+  TF_VAR_environment: "production"
 
 jobs:
   terraform:
@@ -58,7 +59,26 @@ jobs:
 
     - name: Terraform Init
       id: init
-      run: terraform init
+      run: |
+        # Generate storage account name
+        STORAGE_ACCOUNT_NAME="tfstate$(echo $RANDOM | md5sum | head -c 8)"
+        
+        # Create storage account if it doesn't exist
+        az storage account create \
+          --name $STORAGE_ACCOUNT_NAME \
+          --resource-group terraform-state-rg \
+          --location eastus \
+          --sku Standard_LRS \
+          --encryption-services blob
+        
+        # Create container if it doesn't exist
+        az storage container create \
+          --name tfstate \
+          --account-name $STORAGE_ACCOUNT_NAME
+        
+        # Initialize Terraform with the storage account
+        terraform init \
+          -backend-config="storage_account_name=$STORAGE_ACCOUNT_NAME"
       working-directory: ./terraform
 
     - name: Terraform Validate

@@ -7,7 +7,7 @@ terraform {
   }
   backend "azurerm" {
     resource_group_name  = "terraform-state-rg"
-    storage_account_name = "tfstate${random_string.suffix.result}"
+    storage_account_name = "tfstate"
     container_name       = "tfstate"
     key                  = "virtualwan.tfstate"
   }
@@ -39,7 +39,7 @@ locals {
     trimsuffix(hub_file, ".yaml") => yamldecode(
       replace(
         file("${path.module}/config/hubs/${hub_file}"),
-        "\${environment}",
+        "\\${environment}",
         var.environment
       )
     )

@@ -24,7 +24,7 @@ cat > credential.json << EOF
 {
   "name": "github-vwan-actions",
   "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:tpc-cloud/cencora_vwan:ref:refs/heads/main",
+  "subject": "repo:tpc-cloud/cencora_vwan:environment:production",
   "description": "GitHub Actions OIDC for Virtual WAN",
   "audiences": [
     "api://AzureADTokenExchange"
@@ -62,6 +62,52 @@ az storage container create \
   --name tfstate \
   --account-name tfstate<random-string>
 ```
+
+## Testing the Azure Login Configuration
+
+To verify that the Azure login is properly configured:
+
+1. Verify the application exists:
+```bash
+# List applications
+az ad app list --display-name "GitHub-Actions-vWAN" --query "[].{id:appId, name:displayName}" -o table
+
+# Get application details
+az ad app show --id <app-id>
+```
+
+2. Verify the service principal:
+```bash
+# List service principals
+az ad sp list --display-name "GitHub-Actions-vWAN" --query "[].{id:appId, name:displayName}" -o table
+```
+
+3. Verify the federated credential:
+```bash
+# List federated credentials
+az ad app federated-credential list --id <app-id>
+```
+
+4. Verify role assignments:
+```bash
+# List role assignments
+az role assignment list --assignee <app-id> --query "[].{role:roleDefinitionName, scope:scope}" -o table
+```
+
+5. Test the login:
+```bash
+# Test service principal login
+az login --service-principal \
+  --username <app-id> \
+  --tenant <tenant-id> \
+  --password <client-secret>
+```
+
+If you encounter any issues:
+1. Ensure the application is created in the correct tenant
+2. Verify the federated credential subject matches your repository and environment
+3. Check that the service principal has the correct role assignments
+4. Confirm all required secrets are set in GitHub
 
 ## Configuration
 
