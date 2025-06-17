@@ -23,4 +23,22 @@ variable "config_format" {
     condition     = contains(["json", "yaml"], var.config_format)
     error_message = "Config format must be either 'json' or 'yaml'."
   }
+}
+
+variable "CLIENT_ID" {
+  description = "The Client ID for the Service Principal"
+  type        = string
+  sensitive   = true
+}
+
+variable "TENANT_ID" {
+  description = "The Tenant ID for the Azure subscription"
+  type        = string
+  sensitive   = true
+}
+
+variable "SUBSCRIPTION_ID" {
+  description = "The Subscription ID for the Azure subscription"
+  type        = string
+  sensitive   = true
 } 

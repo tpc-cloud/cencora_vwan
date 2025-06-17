@@ -9,7 +9,9 @@ terraform {
 
 provider "azurerm" {
   features {}
-  use_oidc = true
+  client_id       = var.CLIENT_ID
+  tenant_id       = var.TENANT_ID
+  subscription_id = var.SUBSCRIPTION_ID
 }
 
 resource "random_string" "suffix" {
