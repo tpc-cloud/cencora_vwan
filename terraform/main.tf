@@ -9,6 +9,7 @@ terraform {
 
 provider "azurerm" {
   features {}
+  use_oidc = true
 }
 
 resource "random_string" "suffix" {
