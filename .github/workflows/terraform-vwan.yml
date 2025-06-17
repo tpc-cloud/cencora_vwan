@@ -30,6 +30,7 @@ jobs:
         client-id: ${{ secrets.CLIENT_ID }}
         tenant-id: ${{ secrets.TENANT_ID }}
         subscription-id: ${{ secrets.SUBSCRIPTION_ID }}
+        auth-type: OIDC
 
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v2
