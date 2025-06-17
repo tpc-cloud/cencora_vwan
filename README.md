@@ -13,16 +13,29 @@ This repository contains Terraform configurations and GitHub Actions workflows t
 1. Create an Azure Service Principal and configure OIDC authentication:
 
 ```bash
+# Create Azure AD Application
+az ad app create --display-name "GitHub-Actions-vWAN"
+
 # Create Service Principal
 az ad sp create-for-rbac --name "github-actions-vwan" --role "Contributor" --scopes /subscriptions/<subscription-id>
+
+# Create credential.json file
+cat > credential.json << EOF
+{
+  "name": "github-vwan-actions",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "subject": "repo:tpc-cloud/cencora_vwan:ref:refs/heads/main",
+  "description": "GitHub Actions OIDC for Virtual WAN",
+  "audiences": [
+    "api://AzureADTokenExchange"
+  ]
+}
+EOF
 
 # Create Federated Credential
 az ad app federated-credential create \
   --id <app-id> \
-  --name "github-vwan-actions" \
-  --issuer "https://token.actions.githubusercontent.com" \
-  --subject "repo:<github-org>/<repo-name>:ref:refs/heads/main" \
-  --audience "api://AzureADTokenExchange"
+  --parameters credential.json
 ```
 
 2. Add the following secrets to your GitHub repository:
