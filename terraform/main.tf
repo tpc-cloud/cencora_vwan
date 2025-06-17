@@ -30,10 +30,23 @@ resource "azurerm_resource_group" "vwan" {
 }
 
 locals {
-  config = jsondecode(replace(file("${path.module}/config/virtualwan.json"), "\${environment}", var.environment))
+  # Get all hub configuration files
+  hub_files = fileset("${path.module}/config/hubs", "*.yaml")
+  
+  # Read and parse each hub configuration
+  hub_configs = {
+    for hub_file in local.hub_files : 
+    trimsuffix(hub_file, ".yaml") => yamldecode(
+      replace(
+        file("${path.module}/config/hubs/${hub_file}"),
+        "\${environment}",
+        var.environment
+      )
+    )
+  }
   
   virtual_hubs = {
-    for hub_key, hub in local.config.virtual_hubs : hub_key => {
+    for hub_key, hub in local.hub_configs : hub_key => {
       name                = hub.name
       resource_group_name = azurerm_resource_group.vwan.name
       location            = var.location
@@ -44,7 +57,7 @@ locals {
   }
 
   vpn_gateways = {
-    for hub_key, hub in local.config.virtual_hubs : "${hub_key}-vpngw" => {
+    for hub_key, hub in local.hub_configs : "${hub_key}-vpngw" => {
       name                = hub.vpn_gateway.name
       virtual_hub_key     = hub_key
       resource_group_name = azurerm_resource_group.vwan.name
@@ -54,7 +67,7 @@ locals {
   }
 
   express_route_gateways = {
-    for hub_key, hub in local.config.virtual_hubs : "${hub_key}-ergw" => {
+    for hub_key, hub in local.hub_configs : "${hub_key}-ergw" => {
       name                = hub.express_route_gateway.name
       virtual_hub_key     = hub_key
       resource_group_name = azurerm_resource_group.vwan.name

@@ -19,7 +19,7 @@ az ad sp create-for-rbac --name "github-actions-vwan" --role "Contributor" --sco
 # Create Federated Credential
 az ad app federated-credential create \
   --id <app-id> \
-  --name "github-actions" \
+  --name "github-vwan-actions" \
   --issuer "https://token.actions.githubusercontent.com" \
   --subject "repo:<github-org>/<repo-name>:ref:refs/heads/main" \
   --audience "api://AzureADTokenExchange"
@@ -52,40 +52,37 @@ az storage container create \
 
 ## Configuration
 
-The Virtual WAN configuration is stored in `terraform/config/virtualwan.json`. This file contains all the hub and gateway configurations in a structured format.
+The Virtual WAN configuration is organized with one hub per file in the `terraform/config/hubs` directory. Each hub has its own YAML configuration file that defines its settings and associated gateways.
 
-### JSON Configuration Structure
+### Hub Configuration Structure
 
-```json
-{
-  "virtual_hubs": {
-    "hub_key": {
-      "name": "hub-name-${environment}",
-      "address_prefix": "10.0.0.0/24",
-      "sku": "Standard",
-      "hub_routing_preference": "ASPath",
-      "vpn_gateway": {
-        "name": "vpngw-name-${environment}",
-        "scale_unit": 1
-      },
-      "express_route_gateway": {
-        "name": "ergw-name-${environment}",
-        "scale_unit": 1
-      }
-    }
-  }
-}
+Each hub configuration file (e.g., `hub1.yaml`) follows this structure:
+
+```yaml
+name: "hub1-${environment}"
+address_prefix: "10.0.0.0/24"
+sku: "Standard"
+hub_routing_preference: "ASPath"
+vpn_gateway:
+  name: "vpngw1-${environment}"
+  scale_unit: 1
+express_route_gateway:
+  name: "ergw1-${environment}"
+  scale_unit: 1
 ```
 
 ### Configuration Parameters
 
-- `hub_key`: Unique identifier for the hub
 - `name`: Hub name (supports environment variable substitution)
 - `address_prefix`: CIDR block for the hub
 - `sku`: Hub SKU (Standard)
 - `hub_routing_preference`: Routing preference (ASPath, ExpressRoute, VpnGateway)
 - `vpn_gateway`: VPN Gateway configuration (optional)
+  - `name`: Gateway name
+  - `scale_unit`: Gateway scale unit
 - `express_route_gateway`: ExpressRoute Gateway configuration (optional)
+  - `name`: Gateway name
+  - `scale_unit`: Gateway scale unit
 
 ## Infrastructure Components
 
@@ -146,21 +143,23 @@ The configuration deploys a comprehensive Virtual WAN setup with:
 
 ## Customization
 
-You can customize the deployment by modifying the `terraform/config/virtualwan.json` file:
+You can customize the deployment by modifying the hub configuration files:
 
-1. Virtual Hub configurations:
-   - Add or remove hubs
-   - Modify address spaces
-   - Change routing preferences
-   - Update SKU settings
+1. Adding a new hub:
+   - Create a new YAML file in `terraform/config/hubs/`
+   - Follow the configuration structure
+   - The hub will be automatically included in the deployment
 
-2. Gateway configurations:
-   - Add or remove gateways
-   - Modify scale units
-   - Change gateway types
-   - Update hub associations
+2. Modifying existing hubs:
+   - Edit the corresponding YAML file
+   - Update settings as needed
+   - Changes will be applied on next deployment
 
-3. Environment-specific settings:
+3. Removing a hub:
+   - Delete the corresponding YAML file
+   - The hub will be removed on next deployment
+
+4. Environment-specific settings:
    - Use ${environment} variable in names
    - Configure different settings per environment
 

@@ -1,0 +1,10 @@
+name: "hub1-${environment}"
+address_prefix: "10.0.0.0/24"
+sku: "Standard"
+hub_routing_preference: "ASPath"
+vpn_gateway:
+  name: "vpngw1-${environment}"
+  scale_unit: 1
+express_route_gateway:
+  name: "ergw1-${environment}"
+  scale_unit: 1 
