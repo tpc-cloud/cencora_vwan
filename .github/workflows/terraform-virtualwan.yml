@@ -1,4 +1,4 @@
-name: 'Terraform Virtual WAN Deployment'
+name: 'Terraform Virtual WAN'
 
 on:
   push:
@@ -29,11 +29,7 @@ jobs:
   terraform:
     name: 'Terraform'
     runs-on: ubuntu-latest
-    environment: production
-
-    defaults:
-      run:
-        shell: bash
+    environment: dev
 
     steps:
     - name: Checkout
@@ -49,28 +45,40 @@ jobs:
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
       with:
-        terraform_version: "1.7.0"
+        terraform_version: "1.12.2"
 
     - name: Terraform Format
       id: fmt
       run: terraform fmt -check
-      working-directory: ./terraform
+      working-directory: terraform
 
     - name: Terraform Init
       id: init
-      run: terraform init
-      working-directory: ./terraform
+      run: |
+        # Create backend.tf file
+        cat > terraform/backend.tf << EOF
+        terraform {
+          backend "azurerm" {
+            resource_group_name  = "rg-terraform-state"
+            storage_account_name = "stterraformstatedev"
+            container_name       = "tfstate"
+            key                  = "vwan.tfstate"
+          }
+        }
+        EOF
+        terraform init
+      working-directory: terraform
 
     - name: Terraform Validate
       id: validate
       run: terraform validate
-      working-directory: ./terraform
+      working-directory: terraform
 
     - name: Terraform Plan
       id: plan
       if: github.event_name == 'pull_request'
       run: terraform plan -no-color
-      working-directory: ./terraform
+      working-directory: terraform
       continue-on-error: true
 
     - name: Update Pull Request
@@ -104,4 +112,4 @@ jobs:
     - name: Terraform Apply
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       run: terraform apply -auto-approve
-      working-directory: ./terraform 
+      working-directory: terraform 
