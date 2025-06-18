@@ -36,7 +36,7 @@ jobs:
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
       with:
-        terraform_version: "1.7.0"
+        terraform_version: "1.12.2"
 
     - name: Terraform Format
       id: fmt
@@ -45,7 +45,28 @@ jobs:
 
     - name: Terraform Init
       id: init
-      run: terraform init
+      run: |
+        cat > backend.tf <<EOF
+        terraform {
+          backend "azurerm" {
+            resource_group_name  = "rg-terraform-state"
+            storage_account_name = "stterraformstate"
+            container_name       = "tfstate"
+            key                  = "vwan.tfstate"
+          }
+        }
+        EOF
+        terraform init
+
+    - name: Select Workspace
+      run: |
+        # Get the hub name from the environment
+        HUB_NAME=$(echo ${{ github.event.repository.name }} | sed 's/cencora_vwan_//')
+        if [ -z "$HUB_NAME" ]; then
+          HUB_NAME="default"
+        fi
+        echo "HUB_NAME=$HUB_NAME" >> $GITHUB_ENV
+        terraform workspace select $HUB_NAME || terraform workspace new $HUB_NAME
 
     - name: Terraform Validate
       id: validate
