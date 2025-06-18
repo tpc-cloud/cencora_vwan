@@ -1,0 +1,12 @@
+name: "hub2-${environment}"
+address_prefix: "10.2.0.0/24"
+sku: "Standard"
+hub_routing_preference: "ExpressRoute"
+
+vpn_gateway:
+  name: "vpngw-hub2-${environment}"
+  scale_unit: 1
+
+express_route_gateway:
+  name: "ergw-hub2-${environment}"
+  scale_unit: 1 

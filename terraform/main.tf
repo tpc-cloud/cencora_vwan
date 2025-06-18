@@ -11,63 +11,16 @@ provider "azurerm" {
   features {}
 }
 
-resource "random_string" "suffix" {
-  length  = 8
-  special = false
-  upper   = false
-}
-
-resource "azurerm_resource_group" "vwan" {
-  name     = "rg-vwan-${var.environment}"
-  location = var.location
-  tags     = var.tags
-}
-
 locals {
-  # Get all hub configuration files
-  hub_files = fileset("${path.module}/config/hubs", "*.yaml")
-
-  # Read and parse each hub configuration
   hub_configs = {
-    for hub_file in local.hub_files :
-    trimsuffix(hub_file, ".yaml") => yamldecode(
+    for file in fileset("${path.module}/config/hubs", "*.yaml") :
+    trimsuffix(file, ".yaml") => yamldecode(
       replace(
-        file("${path.module}/config/hubs/${hub_file}"),
+        file("${path.module}/config/hubs/${file}"),
         "\\${environment}",
         var.environment
       )
     )
-  }
-
-  virtual_hubs = {
-    for hub_key, hub in local.hub_configs : hub_key => {
-      name                   = hub.name
-      resource_group_name    = azurerm_resource_group.vwan.name
-      location               = var.location
-      address_prefix         = hub.address_prefix
-      sku                    = hub.sku
-      hub_routing_preference = hub.hub_routing_preference
-    }
-  }
-
-  vpn_gateways = {
-    for hub_key, hub in local.hub_configs : "${hub_key}-vpngw" => {
-      name                = hub.vpn_gateway.name
-      virtual_hub_key     = hub_key
-      resource_group_name = azurerm_resource_group.vwan.name
-      location            = var.location
-      scale_unit          = hub.vpn_gateway.scale_unit
-    }
-  }
-
-  express_route_gateways = {
-    for hub_key, hub in local.hub_configs : "${hub_key}-ergw" => {
-      name                = hub.express_route_gateway.name
-      virtual_hub_key     = hub_key
-      resource_group_name = azurerm_resource_group.vwan.name
-      location            = var.location
-      scale_unit          = hub.express_route_gateway.scale_unit
-    } if contains(keys(hub), "express_route_gateway")
   }
 }
 
@@ -79,9 +32,45 @@ module "virtual_wan" {
   resource_group_name = azurerm_resource_group.vwan.name
   location            = var.location
 
-  virtual_hubs           = local.virtual_hubs
-  vpn_gateways           = local.vpn_gateways
-  express_route_gateways = local.express_route_gateways
+  virtual_hubs = {
+    for hub_name, config in local.hub_configs :
+    hub_name => {
+      name                   = config.name
+      resource_group_name    = azurerm_resource_group.vwan.name
+      location               = var.location
+      address_prefix         = config.address_prefix
+      sku                    = config.sku
+      hub_routing_preference = config.hub_routing_preference
+    }
+  }
+
+  vpn_gateways = {
+    for hub_name, config in local.hub_configs :
+    "${hub_name}-vpngw" => {
+      name                = config.vpn_gateway.name
+      virtual_hub_key     = hub_name
+      resource_group_name = azurerm_resource_group.vwan.name
+      location            = var.location
+      scale_unit          = config.vpn_gateway.scale_unit
+    }
+  }
+
+  express_route_gateways = {
+    for hub_name, config in local.hub_configs :
+    "${hub_name}-ergw" => {
+      name                = config.express_route_gateway.name
+      virtual_hub_key     = hub_name
+      resource_group_name = azurerm_resource_group.vwan.name
+      location            = var.location
+      scale_unit          = config.express_route_gateway.scale_unit
+    }
+  }
 
   tags = var.tags
+}
+
+resource "azurerm_resource_group" "vwan" {
+  name     = "rg-vwan-${var.environment}"
+  location = var.location
+  tags     = var.tags
 } 

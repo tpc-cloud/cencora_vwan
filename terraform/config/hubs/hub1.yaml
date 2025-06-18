@@ -1,5 +1,5 @@
 name: "hub1-${environment}"
-address_prefix: "192.0.0.0/24"
+address_prefix: "10.0.0.0/24"
 sku: "Standard"
 hub_routing_preference: "ASPath"
 vpn_gateway:

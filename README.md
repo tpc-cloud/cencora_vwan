@@ -1,234 +1,135 @@
-# Azure Virtual WAN Deployment
+# Azure Virtual WAN Terraform Configuration
 
-This repository contains Terraform configurations and GitHub Actions workflows to deploy and manage Azure Virtual WAN infrastructure using the Azure Verified Module. The configuration supports multiple Virtual Hubs with different routing preferences and associated gateways.
+This repository contains Terraform configurations for deploying and managing Azure Virtual WAN with multiple hubs. The configuration uses a dynamic approach to create and manage hubs based on YAML configuration files.
+
+## Project Structure
+
+```
+.
+├── .github/
+│   └── workflows/          # GitHub Actions workflows
+├── config/
+│   └── hubs/              # Hub configuration files
+│       ├── hub1.yaml
+│       └── hub2.yaml
+├── terraform/
+│   ├── main.tf            # Main Terraform configuration
+│   ├── variables.tf       # Variable definitions
+│   ├── outputs.tf         # Output definitions
+│   └── backend.tf         # Backend configuration
+└── README.md
+```
 
 ## Prerequisites
 
-1. Azure subscription
-2. GitHub repository
-3. Azure Service Principal with appropriate permissions
-
-## Setup Instructions
-
-1. Create an Azure Service Principal and configure OIDC authentication:
-
-```bash
-# Create Azure AD Application
-az ad app create --display-name "GitHub-Actions-vWAN"
-
-# Create Service Principal
-az ad sp create-for-rbac --name "github-actions-vwan" --role "Contributor" --scopes /subscriptions/<subscription-id>
-
-# Create credential.json file
-cat > credential.json << EOF
-{
-  "name": "github-vwan-actions",
-  "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:tpc-cloud/cencora_vwan:environment:production",
-  "description": "GitHub Actions OIDC for Virtual WAN",
-  "audiences": [
-    "api://AzureADTokenExchange"
-  ]
-}
-EOF
-
-# Create Federated Credential
-az ad app federated-credential create \
-  --id <app-id> \
-  --parameters credential.json
-```
-
-2. Add the following secrets to your GitHub repository:
-   - `AZURE_CLIENT_ID`: Service Principal Client ID
-   - `AZURE_TENANT_ID`: Azure Tenant ID
-   - `AZURE_SUBSCRIPTION_ID`: Azure Subscription ID
-
-3. Create the Azure Storage Account for Terraform state:
-
-```bash
-# Create Resource Group
-az group create --name terraform-state-rg --location eastus
-
-# Create Storage Account
-az storage account create \
-  --name tfstate<random-string> \
-  --resource-group terraform-state-rg \
-  --location eastus \
-  --sku Standard_LRS \
-  --encryption-services blob
-
-# Create Container
-az storage container create \
-  --name tfstate \
-  --account-name tfstate<random-string>
-```
-
-## Testing the Azure Login Configuration
-
-To verify that the Azure login is properly configured:
-
-1. Verify the application exists:
-```bash
-# List applications
-az ad app list --display-name "GitHub-Actions-vWAN" --query "[].{id:appId, name:displayName}" -o table
-
-# Get application details
-az ad app show --id <app-id>
-```
-
-2. Verify the service principal:
-```bash
-# List service principals
-az ad sp list --display-name "GitHub-Actions-vWAN" --query "[].{id:appId, name:displayName}" -o table
-```
-
-3. Verify the federated credential:
-```bash
-# List federated credentials
-az ad app federated-credential list --id <app-id>
-```
-
-4. Verify role assignments:
-```bash
-# List role assignments
-az role assignment list --assignee <app-id> --query "[].{role:roleDefinitionName, scope:scope}" -o table
-```
-
-5. Test the login:
-```bash
-# Test service principal login
-az login --service-principal \
-  --username <app-id> \
-  --tenant <tenant-id> \
-  --password <client-secret>
-```
-
-If you encounter any issues:
-1. Ensure the application is created in the correct tenant
-2. Verify the federated credential subject matches your repository and environment
-3. Check that the service principal has the correct role assignments
-4. Confirm all required secrets are set in GitHub
+- Azure subscription
+- Terraform >= 1.0.0
+- Azure CLI
+- GitHub repository with OIDC authentication configured
 
 ## Configuration
 
-The Virtual WAN configuration is organized with one hub per file in the `terraform/config/hubs` directory. Each hub has its own YAML configuration file that defines its settings and associated gateways.
+### Hub Configuration
 
-### Hub Configuration Structure
-
-Each hub configuration file (e.g., `hub1.yaml`) follows this structure:
+Each hub is configured using a YAML file in the `config/hubs` directory. Example configuration:
 
 ```yaml
 name: "hub1-${environment}"
-address_prefix: "10.0.0.0/24"
+address_prefix: "10.1.0.0/24"
 sku: "Standard"
-hub_routing_preference: "ASPath"
+hub_routing_preference: "ExpressRoute"
+
 vpn_gateway:
-  name: "vpngw1-${environment}"
+  name: "vpngw-hub1-${environment}"
   scale_unit: 1
+
 express_route_gateway:
-  name: "ergw1-${environment}"
+  name: "ergw-hub1-${environment}"
   scale_unit: 1
 ```
 
-### Configuration Parameters
+### Environment Variables
 
-- `name`: Hub name (supports environment variable substitution)
-- `address_prefix`: CIDR block for the hub
-- `sku`: Hub SKU (Standard)
-- `hub_routing_preference`: Routing preference (ASPath, ExpressRoute, VpnGateway)
-- `vpn_gateway`: VPN Gateway configuration (optional)
-  - `name`: Gateway name
-  - `scale_unit`: Gateway scale unit
-- `express_route_gateway`: ExpressRoute Gateway configuration (optional)
-  - `name`: Gateway name
-  - `scale_unit`: Gateway scale unit
+The following variables are used in the configuration:
 
-## Infrastructure Components
-
-The configuration deploys a comprehensive Virtual WAN setup with:
-
-### Virtual Hubs
-- **Hub 1 (ASPath)**
-  - Address Space: 10.0.0.0/24
-  - Associated VPN Gateway
-  - Associated ExpressRoute Gateway
-  - ASPath routing preference
-
-- **Hub 2 (ExpressRoute)**
-  - Address Space: 10.1.0.0/24
-  - Associated VPN Gateway
-  - Associated ExpressRoute Gateway
-  - ExpressRoute routing preference
-
-- **Hub 3 (VPN)**
-  - Address Space: 10.2.0.0/24
-  - Associated VPN Gateway
-  - VPN Gateway routing preference
-
-- **Hub 4 (ASPath)**
-  - Address Space: 10.3.0.0/24
-  - Associated VPN Gateway
-  - ASPath routing preference
-
-### Gateways
-- VPN Gateways for each hub
-- ExpressRoute Gateways for Hub 1 and Hub 2
-- Standard SKU for all gateways
-- Scale units configured for each gateway
-
-### Routing Preferences
-- ASPath: Optimized for general routing
-- ExpressRoute: Optimized for ExpressRoute connections
-- VPNGateway: Optimized for VPN connections
+- `environment`: Environment name (e.g., dev, prod)
+- `location`: Azure region for resources (default: eastus)
+- `tags`: Tags to apply to all resources
 
 ## Usage
 
-1. The GitHub Actions workflow will automatically run on:
-   - Push to main branch
-   - Pull requests to main branch
-   - Changes to terraform/** files
+### Local Development
 
-2. The workflow will:
-   - Format and validate Terraform code
-   - Plan changes on pull requests
-   - Apply changes when merged to main
+1. Initialize Terraform:
+   ```bash
+   terraform init
+   ```
 
-3. To deploy changes:
-   - Create a new branch
-   - Make your changes
-   - Create a pull request
-   - Review the plan output in the PR
-   - Merge to main to apply changes
+2. Create a `terraform.tfvars` file with your variables:
+   ```hcl
+   environment = "dev"
+   location    = "eastus"
+   tags = {
+     Environment = "dev"
+     Project     = "vwan"
+   }
+   ```
 
-## Customization
+3. Plan and apply:
+   ```bash
+   terraform plan
+   terraform apply
+   ```
 
-You can customize the deployment by modifying the hub configuration files:
+### GitHub Actions
 
-1. Adding a new hub:
-   - Create a new YAML file in `terraform/config/hubs/`
-   - Follow the configuration structure
-   - The hub will be automatically included in the deployment
+The repository includes GitHub Actions workflows for automated deployment:
 
-2. Modifying existing hubs:
-   - Edit the corresponding YAML file
-   - Update settings as needed
-   - Changes will be applied on next deployment
+1. `terraform.yml`: Main workflow for Terraform operations
+   - Uses OIDC authentication
+   - Supports plan and apply operations
+   - Includes security scanning
 
-3. Removing a hub:
-   - Delete the corresponding YAML file
-   - The hub will be removed on next deployment
+2. `azure-ad-app.yml`: Workflow for Azure AD application management
+   - Creates/updates Azure AD application
+   - Configures OIDC authentication
+   - Manages service principal
 
-4. Environment-specific settings:
-   - Use ${environment} variable in names
-   - Configure different settings per environment
+## Adding a New Hub
+
+To add a new hub:
+
+1. Create a new YAML file in `config/hubs/` (e.g., `hub3.yaml`)
+2. Define the hub's configuration following the existing pattern
+3. The main Terraform configuration will automatically pick up the new hub
+
+## State Management
+
+Each hub's state is stored in Azure Blob Storage with the following structure:
+```
+tfstate/
+├── hubs/
+│   ├── hub1/
+│   │   └── terraform.tfstate
+│   └── hub2/
+│       └── terraform.tfstate
+```
+
+## Security
+
+- Uses OIDC authentication for GitHub Actions
+- Implements least privilege access
+- Includes security scanning in CI/CD pipeline
+- Follows Azure security best practices
 
 ## Contributing
 
 1. Fork the repository
 2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
+3. Commit your changes
+4. Push to the branch
+5. Create a Pull Request
 
 ## License
 
-MIT 
+This project is licensed under the MIT License - see the LICENSE file for details. 

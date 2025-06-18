@@ -1,17 +1,21 @@
+variable "hub_name" {
+  description = "Name of the hub for state file naming"
+  type        = string
+}
+
 variable "environment" {
   description = "Environment name (e.g., dev, prod)"
   type        = string
-  default     = "dev"
 }
 
 variable "location" {
-  description = "Azure region where resources will be created"
+  description = "Azure region for resources"
   type        = string
   default     = "eastus"
 }
 
 variable "tags" {
-  description = "Tags to be applied to all resources"
+  description = "Tags to apply to all resources"
   type        = map(string)
   default     = {}
 }
@@ -24,22 +28,4 @@ variable "config_format" {
     condition     = contains(["json", "yaml"], var.config_format)
     error_message = "Config format must be either 'json' or 'yaml'."
   }
-}
-
-variable "CLIENT_ID" {
-  description = "The Client ID for the Service Principal"
-  type        = string
-  sensitive   = true
-}
-
-variable "TENANT_ID" {
-  description = "The Tenant ID for the Azure subscription"
-  type        = string
-  sensitive   = true
-}
-
-variable "SUBSCRIPTION_ID" {
-  description = "The Subscription ID for the Azure subscription"
-  type        = string
-  sensitive   = true
 } 
