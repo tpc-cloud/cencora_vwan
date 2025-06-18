@@ -1,4 +1,4 @@
-name: 'Terraform Virtual WAN Deployment'
+name: 'Terraform Virtual WAN'
 
 on:
   push:
@@ -33,7 +33,7 @@ jobs:
 
     defaults:
       run:
-        shell: bash
+        working-directory: ./terraform
 
     steps:
     - name: Checkout
@@ -49,59 +49,114 @@ jobs:
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
       with:
-        terraform_version: "1.7.0"
+        terraform_version: "1.7.5"
+
+    - name: Setup Backend Storage
+      id: storage
+      run: |
+        # Set variables
+        RESOURCE_GROUP="rg-terraform-state"
+        RANDOM_SUFFIX=$(openssl rand -hex 4)
+        STORAGE_ACCOUNT="stterraformstate${RANDOM_SUFFIX}"
+        CONTAINER_NAME="tfstate"
+        LOCATION="eastus"
+
+        # Create resource group if it doesn't exist
+        echo "Creating resource group $RESOURCE_GROUP..."
+        az group create --name $RESOURCE_GROUP --location $LOCATION
+
+        # Create storage account if it doesn't exist
+        echo "Creating storage account $STORAGE_ACCOUNT..."
+        az storage account create \
+            --name $STORAGE_ACCOUNT \
+            --resource-group $RESOURCE_GROUP \
+            --location $LOCATION \
+            --sku Standard_LRS \
+            --encryption-services blob
+
+        # Create blob container if it doesn't exist
+        echo "Creating blob container $CONTAINER_NAME..."
+        az storage container create \
+            --name $CONTAINER_NAME \
+            --account-name $STORAGE_ACCOUNT
+
+        # Save storage account name for later steps
+        echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
 
     - name: Terraform Format
       id: fmt
       run: terraform fmt -check
-      working-directory: ./terraform
 
     - name: Terraform Init
       id: init
-      run: terraform init
-      working-directory: ./terraform
+      run: |
+        # Create backend.tf file
+        cat > backend.tf << EOF
+        terraform {
+          backend "azurerm" {
+            resource_group_name  = "rg-terraform-state"
+            storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+            container_name       = "tfstate"
+            key                  = "vwan.tfstate"
+            use_oidc            = true
+          }
+        }
+        EOF
+        terraform init
 
     - name: Terraform Validate
       id: validate
       run: terraform validate
-      working-directory: ./terraform
 
     - name: Terraform Plan
       id: plan
       if: github.event_name == 'pull_request'
-      run: terraform plan -no-color
-      working-directory: ./terraform
+      run: |
+        terraform plan -no-color \
+          -var="client_id=${{ secrets.AZURE_CLIENT_ID }}" \
+          -var="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
+          -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+          -var="environment=prod"
       continue-on-error: true
 
     - name: Update Pull Request
+      if: github.event_name == 'pull_request' && github.event.pull_request.number != null
       uses: actions/github-script@v7
-      if: github.event_name == 'pull_request'
       env:
-        PLAN: "${{ steps.plan.outputs.stdout }}"
+        PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
         script: |
-          const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
-          #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
-          #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
-          #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
+          try {
+            const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+            #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+            #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
+            #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
 
-          <details><summary>Show Plan</summary>
+            <details><summary>Show Plan</summary>
 
-          \`\`\`\n
-          ${process.env.PLAN}
-          \`\`\`
+            \`\`\`\n
+            ${process.env.PLAN}
+            \`\`\`
 
-          </details>`;
+            </details>`;
 
-          github.rest.issues.createComment({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.name,
-            body: output
-          })
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.name,
+              issue_number: context.issue.number,
+              body: output
+            });
+          } catch (error) {
+            console.error('Error creating comment:', error.message);
+            // Don't fail the workflow if comment creation fails
+          }
 
     - name: Terraform Apply
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-      run: terraform apply -auto-approve
-      working-directory: ./terraform 
+      run: |
+        terraform apply -auto-approve \
+          -var="client_id=${{ secrets.AZURE_CLIENT_ID }}" \
+          -var="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
+          -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+          -var="environment=prod" 
