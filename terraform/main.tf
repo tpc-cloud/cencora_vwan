@@ -43,7 +43,7 @@ locals {
   virtual_hubs = {
     for hub_key, hub in local.hub_configs : hub_key => {
       name                   = hub.name
-      resource_group_name    = azurerm_resource_group.vwan.name
+      resource_group         = azurerm_resource_group.vwan.name
       location               = var.location
       address_prefix         = hub.address_prefix
       sku                    = hub.sku
