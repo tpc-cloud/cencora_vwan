@@ -78,7 +78,7 @@ module "virtual_wan" {
 
   virtual_wan_name    = "vwan-${var.environment}"
   resource_group_name = azurerm_resource_group.vwan.name
-  location           = var.location
+  location            = var.location
 
   virtual_hubs          = local.virtual_hubs
   vpn_gateways          = local.vpn_gateways
