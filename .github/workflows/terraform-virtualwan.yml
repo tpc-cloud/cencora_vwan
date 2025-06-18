@@ -98,6 +98,7 @@ jobs:
             storage_account_name = "${{ steps.storage.outputs.storage_account }}"
             container_name       = "tfstate"
             key                  = "vwan.tfstate"
+            use_oidc            = true
           }
         }
         EOF
@@ -110,12 +111,7 @@ jobs:
     - name: Terraform Plan
       id: plan
       if: github.event_name == 'pull_request'
-      run: |
-        terraform plan -no-color \
-          -var="client_id=${{ secrets.AZURE_CLIENT_ID }}" \
-          -var="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
-          -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
-          -var="environment=prod"
+      run: terraform plan -no-color -var="environment=prod"
       continue-on-error: true
 
     - name: Update Pull Request
@@ -153,9 +149,4 @@ jobs:
 
     - name: Terraform Apply
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-      run: |
-        terraform apply -auto-approve \
-          -var="client_id=${{ secrets.AZURE_CLIENT_ID }}" \
-          -var="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
-          -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
-          -var="environment=prod" 
+      run: terraform apply -auto-approve -var="environment=prod" 
