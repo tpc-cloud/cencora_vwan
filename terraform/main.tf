@@ -76,13 +76,13 @@ module "virtual_wan" {
   source  = "Azure/avm-ptn-virtualwan/azurerm"
   version = "0.12.3"
 
-  name                = "vwan-${var.environment}"
-  resource_group_name = azurerm_resource_group.vwan.name
-  location            = var.location
+  virtual_wan_name      = "vwan-${var.environment}"
+  resource_group_name   = azurerm_resource_group.vwan.name
+  location             = var.location
 
-  virtual_hubs           = local.virtual_hubs
-  vpn_gateways           = local.vpn_gateways
-  express_route_gateways = local.express_route_gateways
+  virtual_hubs            = local.virtual_hubs
+  vpn_gateways            = local.vpn_gateways
+  expressroute_gateways   = local.express_route_gateways
 
   tags = var.tags
 } 
