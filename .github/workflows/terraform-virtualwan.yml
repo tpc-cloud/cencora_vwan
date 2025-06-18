@@ -49,7 +49,7 @@ jobs:
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
       with:
-        terraform_version: "1.12.2"
+        terraform_version: "1.7.5"
 
     - name: Setup Backend Storage
       id: storage
