@@ -1,14 +1,15 @@
 #!/bin/bash
 
 # Check if required arguments are provided
-if [ "$#" -ne 3 ]; then
-    echo "Usage: $0 <app-name> <github-org> <github-repo>"
+if [ "$#" -ne 4 ]; then
+    echo "Usage: $0 <app-name> <github-org> <github-repo> <environment>"
     exit 1
 fi
 
 APP_NAME=$1
 GITHUB_ORG=$2
 GITHUB_REPO=$3
+ENVIRONMENT=$4
 
 # Create Azure AD Application
 echo "Creating Azure AD Application..."
@@ -24,10 +25,10 @@ echo "Service Principal created with ID: $SP_ID"
 echo "Creating OIDC credential configuration..."
 cat > credential.json << EOF
 {
-  "name": "github-actions",
+  "name": "github-actions-${ENVIRONMENT}",
   "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:${GITHUB_ORG}/${GITHUB_REPO}:ref:refs/heads/main",
-  "description": "GitHub Actions OIDC for ${APP_NAME}",
+  "subject": "repo:${GITHUB_ORG}/${GITHUB_REPO}:environment:${ENVIRONMENT}",
+  "description": "GitHub Actions OIDC for ${APP_NAME} in ${ENVIRONMENT}",
   "audiences": [
     "api://AzureADTokenExchange"
   ]
