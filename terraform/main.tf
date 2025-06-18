@@ -39,7 +39,7 @@ locals {
     trimsuffix(hub_file, ".yaml") => yamldecode(
       replace(
         file("${path.module}/config/hubs/${hub_file}"),
-        "\${environment}",
+        "$${environment}",
         var.environment
       )
     )
