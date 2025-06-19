@@ -132,8 +132,5 @@ jobs:
           
           echo "Running terraform apply for hub: $hub"
           
-          # Set hub-specific environment variable
-          export TF_VAR_hub_name="${hub}"
-          
-          terraform apply -auto-approve
+          terraform apply -auto-approve -var="hub_name=${hub}"
         done 
