@@ -117,6 +117,10 @@ jobs:
           sed -i "s/HUB_NAME_PLACEHOLDER/prod\/${hub}.tfstate/g" backend.tf
           
           terraform init -reconfigure
+          
+          # Import existing resource group if it exists
+          terraform import azurerm_resource_group.vwan /subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-prod || echo "Resource group import failed or not needed"
+          
           terraform apply -auto-approve \
             -var="client_id=${{ secrets.AZURE_CLIENT_ID }}" \
             -var="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
