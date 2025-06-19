@@ -163,7 +163,8 @@ jobs:
           echo "Breaking any existing blob leases..."
           az storage blob lease break --container-name tfstate --blob-name "prod/${hub}.tfstate" --account-name ${{ steps.storage.outputs.storage_account }} 2>/dev/null || echo "No existing lease to break or blob doesn't exist"
           
-          # Copy the hub-specific Terraform configuration
+          # Remove other .tf files to avoid conflicts, then copy the hub-specific Terraform configuration
+          rm -f main.tf main-vwan-core.tf
           cp main-hubs.tf main.tf
           
           terraform apply -auto-approve -var-file="terraform.tfvars" -input=false -lock=false

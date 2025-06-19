@@ -131,7 +131,8 @@ jobs:
         echo "environment = \"${{ github.event.inputs.environment }}\"" >> terraform.tfvars
         echo "hub_name = \"vwan-core\"" >> terraform.tfvars
         
-        # Copy the Virtual WAN core Terraform configuration
+        # Remove other .tf files to avoid conflicts, then copy the Virtual WAN core Terraform configuration
+        rm -f main.tf main-hubs.tf
         cp main-vwan-core.tf main.tf
-          
+        
         terraform apply -auto-approve -var-file="terraform.tfvars" -input=false -lock=false 
