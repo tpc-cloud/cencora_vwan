@@ -4,7 +4,7 @@ terraform {
     storage_account_name = "stterraformstatedev"
     container_name       = "tfstate"
     key                  = "prod/hub1.tfstate"
-    use_oidc            = true
+    use_oidc             = true
   }
 }
 
