@@ -133,6 +133,12 @@ jobs:
         echo "Breaking any existing blob leases..."
         az storage blob lease break --container-name tfstate --blob-name "${{ github.event.inputs.environment }}/vwan-core.tfstate" --account-name ${{ steps.storage.outputs.storage_account }} 2>/dev/null || echo "No existing lease to break or blob doesn't exist"
         
+        # Create terraform.tfvars file BEFORE import operations
+        echo "client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"" > terraform.tfvars
+        echo "tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"" >> terraform.tfvars
+        echo "subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"" >> terraform.tfvars
+        echo "environment = \"${{ github.event.inputs.environment }}\"" >> terraform.tfvars
+        
         # Check if resource group exists and import it if needed
         echo "Checking if resource group rg-vwan-${{ github.event.inputs.environment }} exists..."
         if az group show --name "rg-vwan-${{ github.event.inputs.environment }}" >/dev/null 2>&1; then
@@ -152,13 +158,6 @@ jobs:
         fi
           
         echo "Creating Virtual WAN core infrastructure..."
-          
-        # Create terraform.tfvars file
-        echo "client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"" > terraform.tfvars
-        echo "tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"" >> terraform.tfvars
-        echo "subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"" >> terraform.tfvars
-        echo "environment = \"${{ github.event.inputs.environment }}\"" >> terraform.tfvars
-        echo "hub_name = \"vwan-core\"" >> terraform.tfvars
         
         # Debug: Show what .tf files exist in clean directory
         echo "Debug: .tf files in clean directory:"
