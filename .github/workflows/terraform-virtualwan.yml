@@ -133,8 +133,8 @@ jobs:
           echo "Running terraform apply for hub: $hub"
 
           # Import existing resource group if it exists (with timeout and better error handling)
-          # echo "Attempting to import resource group..."
-          # timeout 30s terraform import azurerm_resource_group.vwan /subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-prod 2>/dev/null || echo "Resource group import failed or not needed - continuing..."
+          echo "Attempting to import resource group..."
+          timeout 30s terraform import azurerm_resource_group.vwan /subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-prod 2>/dev/null || echo "Resource group import failed or not needed - continuing..."
           
           echo "Debug: Hub name being passed: ${hub}"
           
