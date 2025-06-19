@@ -96,7 +96,18 @@ jobs:
 
     - name: Terraform Apply Virtual WAN Core
       run: |
-        # Create backend.tf file for Virtual WAN core
+        # Create a completely clean working directory
+        rm -rf temp_terraform
+        mkdir -p temp_terraform
+        
+        # Copy only the specific files we need (not backend.tf since we create it)
+        cp variables.tf temp_terraform/
+        cp main-vwan-core.tf temp_terraform/main.tf
+        
+        # Move to the clean directory
+        cd temp_terraform
+        
+        # Create backend.tf file for Virtual WAN core in the clean directory
         cat > backend.tf << 'EOF'
         terraform {
           backend "azurerm" {
@@ -131,21 +142,8 @@ jobs:
         echo "environment = \"${{ github.event.inputs.environment }}\"" >> terraform.tfvars
         echo "hub_name = \"vwan-core\"" >> terraform.tfvars
         
-        # Debug: Show what .tf files exist before cleanup
-        echo "Debug: .tf files before cleanup:"
-        ls -la *.tf
-        
-        # Create a clean working directory with only the files we need
-        mkdir -p temp_terraform
-        cp variables.tf temp_terraform/
-        cp backend.tf temp_terraform/
-        cp main-vwan-core.tf temp_terraform/main.tf
-        
-        # Move to the clean directory
-        cd temp_terraform
-        
         # Debug: Show what .tf files exist in clean directory
         echo "Debug: .tf files in clean directory:"
         ls -la *.tf
         
-        terraform apply -auto-approve -var-file="../terraform.tfvars" -input=false -lock=false 
+        terraform apply -auto-approve -var-file="terraform.tfvars" -input=false -lock=false 
