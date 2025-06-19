@@ -49,7 +49,7 @@ jobs:
       id: storage
       run: |
         # Set variables
-        RESOURCE_GROUP="rg-terraform-state"
+        RESOURCE_GROUP="rg-tf-state"
         RANDOM_SUFFIX=$(openssl rand -hex 4)
         STORAGE_ACCOUNT="stterraformstate${RANDOM_SUFFIX}"
         CONTAINER_NAME="tfstate"
@@ -103,7 +103,7 @@ jobs:
           cat > backend.tf << 'EOF'
         terraform {
           backend "azurerm" {
-            resource_group_name  = "rg-terraform-state"
+            resource_group_name  = "rg-tf-state"
             storage_account_name = "STORAGE_ACCOUNT_PLACEHOLDER"
             container_name       = "tfstate"
             key                  = "HUB_NAME_PLACEHOLDER"
