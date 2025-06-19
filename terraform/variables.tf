@@ -18,6 +18,11 @@ variable "environment" {
   type        = string
 }
 
+variable "hub_name" {
+  description = "The name of the hub being deployed"
+  type        = string
+}
+
 variable "location" {
   description = "The Azure region to deploy resources"
   type        = string
