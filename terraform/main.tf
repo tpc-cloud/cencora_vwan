@@ -18,10 +18,8 @@ provider "azurerm" {
   use_oidc = true
 }
 
-resource "azurerm_resource_group" "vwan" {
-  name     = "rg-vwan-${var.environment}"
-  location = var.location
-  tags     = var.tags
+data "azurerm_resource_group" "vwan" {
+  name = "rg-vwan-${var.environment}"
 }
 
 locals {
@@ -43,7 +41,7 @@ locals {
   virtual_hubs = {
     for hub_key, hub in local.hub_configs : hub_key => {
       name                   = hub.name
-      resource_group         = azurerm_resource_group.vwan.name
+      resource_group         = data.azurerm_resource_group.vwan.name
       location               = var.location
       address_prefix         = hub.address_prefix
       sku                    = hub.sku
@@ -55,7 +53,7 @@ locals {
     for hub_key, hub in local.hub_configs : "${hub_key}-vpngw" => {
       name                = hub.vpn_gateway.name
       virtual_hub_key     = hub_key
-      resource_group_name = azurerm_resource_group.vwan.name
+      resource_group_name = data.azurerm_resource_group.vwan.name
       location            = var.location
       scale_unit          = hub.vpn_gateway.scale_unit
     }
@@ -65,7 +63,7 @@ locals {
     for hub_key, hub in local.hub_configs : "${hub_key}-ergw" => {
       name                = hub.express_route_gateway.name
       virtual_hub_key     = hub_key
-      resource_group_name = azurerm_resource_group.vwan.name
+      resource_group_name = data.azurerm_resource_group.vwan.name
       location            = var.location
       scale_unit          = hub.express_route_gateway.scale_unit
     } if contains(keys(hub), "express_route_gateway")
@@ -77,7 +75,7 @@ module "virtual_wan" {
   version = "0.12.3"
 
   virtual_wan_name    = "vwan-${var.environment}"
-  resource_group_name = azurerm_resource_group.vwan.name
+  resource_group_name = data.azurerm_resource_group.vwan.name
   location            = var.location
 
   virtual_hubs          = local.virtual_hubs
