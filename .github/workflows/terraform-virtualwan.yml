@@ -125,6 +125,10 @@ jobs:
           cp variables.tf hub-${hub}/
           cp main-hubs.tf hub-${hub}/main.tf
           
+          # Create resource group if it doesn't exist
+          echo "Creating resource group rg-vwan-prod if it doesn't exist..."
+          az group create --name "rg-vwan-prod" --location "eastus" 2>/dev/null || echo "Resource group already exists"
+          
           # Create backend.tf file for this hub
           echo "terraform {" > hub-${hub}/backend.tf
           echo "  backend \"azurerm\" {" >> hub-${hub}/backend.tf

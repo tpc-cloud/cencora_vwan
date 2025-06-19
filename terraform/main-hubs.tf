@@ -34,7 +34,7 @@ locals {
   # Read and parse the specific hub configuration
   hub_config = yamldecode(
     replace(
-      file("${path.module}/config/hubs/${local.hub_file}"),
+      file("../config/hubs/${local.hub_file}"),
       "$${environment}",
       var.environment
     )
