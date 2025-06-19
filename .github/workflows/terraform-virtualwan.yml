@@ -114,14 +114,19 @@ jobs:
       id: fmt
       run: terraform fmt -check
 
-    - name: Terraform Apply
+    - name: Terraform Apply Hub
       run: |
         # Process each hub
         for hub in ${{ steps.changed_hubs.outputs.hub_names }}; do
           echo "Processing hub: $hub"
           
-          # Create backend.tf file for each hub
-          cat > backend.tf << 'EOF'
+          # Create a clean directory for this hub
+          mkdir -p hub-${hub}
+          cp variables.tf hub-${hub}/
+          cp main-hubs.tf hub-${hub}/main.tf
+          
+          # Create backend.tf file for this hub
+          cat > hub-${hub}/backend.tf << 'EOF'
         terraform {
           backend "azurerm" {
             resource_group_name  = "rg-tf-state"
@@ -134,51 +139,25 @@ jobs:
         EOF
           
           # Replace placeholders with actual values
-          sed -i "s/STORAGE_ACCOUNT_PLACEHOLDER/${{ steps.storage.outputs.storage_account }}/g" backend.tf
-          sed -i "s/HUB_NAME_PLACEHOLDER/prod\/${hub}.tfstate/g" backend.tf
+          sed -i "s/STORAGE_ACCOUNT_PLACEHOLDER/${{ steps.storage.outputs.storage_account }}/g" hub-${hub}/backend.tf
+          sed -i "s/HUB_NAME_PLACEHOLDER/prod\/${hub}.tfstate/g" hub-${hub}/backend.tf
           
-          echo "Backend configuration created for hub: $hub"
-          cat backend.tf
+          # Create terraform.tfvars for this hub
+          echo "client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"" > hub-${hub}/terraform.tfvars
+          echo "tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"" >> hub-${hub}/terraform.tfvars
+          echo "subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"" >> hub-${hub}/terraform.tfvars
+          echo "environment = \"prod\"" >> hub-${hub}/terraform.tfvars
+          echo "hub_name = \"${hub}\"" >> hub-${hub}/terraform.tfvars
           
-          terraform init -reconfigure
-          
-          echo "Debug: Hub name being passed: ${hub}"
-          
-          # Create a comprehensive tfvars file with all variables
-          echo "client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"" > terraform.tfvars
-          echo "tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"" >> terraform.tfvars
-          echo "subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"" >> terraform.tfvars
-          echo "environment = \"prod\"" >> terraform.tfvars
-          echo "hub_name = \"${hub}\"" >> terraform.tfvars
-          
-          echo "Debug: Contents of terraform.tfvars:"
-          cat terraform.tfvars
-          
-          echo "Debug: Environment variables:"
-          env | grep TF_VAR
-          
-          echo "Debug: About to run terraform apply..."
-          
-          # Break any existing blob leases that might be causing issues
+          # Break any existing blob leases
           echo "Breaking any existing blob leases..."
           az storage blob lease break --container-name tfstate --blob-name "prod/${hub}.tfstate" --account-name ${{ steps.storage.outputs.storage_account }} 2>/dev/null || echo "No existing lease to break or blob doesn't exist"
           
-          # Debug: Show what .tf files exist before cleanup
-          echo "Debug: .tf files before cleanup:"
-          ls -la *.tf
+          echo "Debug: Files in hub-${hub} directory:"
+          ls -la hub-${hub}/
           
-          # Create a clean working directory with only the files we need
-          mkdir -p temp_terraform
-          cp variables.tf temp_terraform/
-          cp backend.tf temp_terraform/
-          cp main-hubs.tf temp_terraform/main.tf
-          
-          # Move to the clean directory
-          cd temp_terraform
-          
-          # Debug: Show what .tf files exist in clean directory
-          echo "Debug: .tf files in clean directory:"
-          ls -la *.tf
-          
-          terraform apply -auto-approve -var-file="../terraform.tfvars" -input=false -lock=false
-        done 
+          # Run terraform in the hub directory
+          cd hub-${hub}
+          terraform init -reconfigure
+          terraform apply -auto-approve -var-file="terraform.tfvars" -input=false -lock=false
+          cd .. 
