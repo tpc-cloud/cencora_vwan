@@ -1,0 +1,156 @@
+name: 'Terraform Virtual WAN Destroy'
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to destroy (e.g., dev, prod)'
+        required: true
+        default: 'prod'
+        type: choice
+        options:
+          - dev
+          - prod
+      hub:
+        description: 'Specific hub to destroy (leave empty for all hubs)'
+        required: false
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terraform:
+    name: 'Terraform Destroy'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+
+    defaults:
+      run:
+        working-directory: ./terraform
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Azure Login
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: "1.12.2"
+
+    - name: Setup Backend Storage
+      id: storage
+      run: |
+        # Set variables
+        RESOURCE_GROUP="rg-terraform-state"
+        RANDOM_SUFFIX=$(openssl rand -hex 4)
+        STORAGE_ACCOUNT="stterraformstate${RANDOM_SUFFIX}"
+        CONTAINER_NAME="tfstate"
+        LOCATION="eastus"
+
+        # Create resource group if it doesn't exist
+        echo "Creating resource group $RESOURCE_GROUP..."
+        az group create --name $RESOURCE_GROUP --location $LOCATION
+
+        # Create storage account if it doesn't exist
+        echo "Creating storage account $STORAGE_ACCOUNT..."
+        az storage account create \
+            --name $STORAGE_ACCOUNT \
+            --resource-group $RESOURCE_GROUP \
+            --location $LOCATION \
+            --sku Standard_LRS \
+            --encryption-services blob
+
+        # Create blob container if it doesn't exist
+        echo "Creating blob container $CONTAINER_NAME..."
+        az storage container create \
+            --name $CONTAINER_NAME \
+            --account-name $STORAGE_ACCOUNT
+
+        # Save storage account name for later steps
+        echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
+
+    - name: Get Hub List
+      id: hubs
+      run: |
+        # Get list of hub config files
+        HUB_FILES=$(ls ../config/hubs/*.yaml)
+        HUB_NAMES=""
+        for file in $HUB_FILES; do
+          HUB_NAME=$(basename "$file" .yaml)
+          HUB_NAMES="$HUB_NAMES $HUB_NAME"
+        done
+        echo "hub_names=$HUB_NAMES" >> $GITHUB_OUTPUT
+
+    - name: Terraform Init and Destroy
+      run: |
+        # If specific hub is provided, only process that hub
+        if [ -n "${{ github.event.inputs.hub }}" ]; then
+          HUB_NAME="${{ github.event.inputs.hub }}"
+          echo "Processing single hub: $HUB_NAME"
+          
+          # Create backend.tf file for specific hub
+          cat > backend.tf << EOF
+          terraform {
+            backend "azurerm" {
+              resource_group_name  = "rg-terraform-state"
+              storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+              container_name       = "tfstate"
+              key                  = "${{ github.event.inputs.environment }}/$HUB_NAME.tfstate"
+              use_oidc            = true
+            }
+          }
+          EOF
+          
+          terraform init -reconfigure
+          terraform plan -destroy -no-color \
+            -var="client_id=${{ secrets.AZURE_CLIENT_ID }}" \
+            -var="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
+            -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            -var="environment=${{ github.event.inputs.environment }}"
+          
+          terraform destroy -auto-approve \
+            -var="client_id=${{ secrets.AZURE_CLIENT_ID }}" \
+            -var="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
+            -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            -var="environment=${{ github.event.inputs.environment }}"
+        else
+          # Process all hubs
+          for hub in ${{ steps.hubs.outputs.hub_names }}; do
+            echo "Processing hub: $hub"
+            
+            # Create backend.tf file for each hub
+            cat > backend.tf << EOF
+            terraform {
+              backend "azurerm" {
+                resource_group_name  = "rg-terraform-state"
+                storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+                container_name       = "tfstate"
+                key                  = "${{ github.event.inputs.environment }}/$hub.tfstate"
+                use_oidc            = true
+              }
+            }
+            EOF
+            
+            terraform init -reconfigure
+            terraform plan -destroy -no-color \
+              -var="client_id=${{ secrets.AZURE_CLIENT_ID }}" \
+              -var="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
+              -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+              -var="environment=${{ github.event.inputs.environment }}"
+            
+            terraform destroy -auto-approve \
+              -var="client_id=${{ secrets.AZURE_CLIENT_ID }}" \
+              -var="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
+              -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+              -var="environment=${{ github.event.inputs.environment }}"
+          done
+        fi 

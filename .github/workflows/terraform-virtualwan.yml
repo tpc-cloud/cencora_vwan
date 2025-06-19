@@ -7,17 +7,11 @@ on:
     paths:
       - 'terraform/**'
       - '.github/workflows/terraform-virtualwan.yml'
-  pull_request:
-    branches:
-      - main
-    paths:
-      - 'terraform/**'
-      - '.github/workflows/terraform-virtualwan.yml'
+      - 'config/**'
 
 permissions:
   id-token: write
   contents: read
-  pull-requests: write
 
 env:
   ARM_CLIENT_ID: "${{ secrets.AZURE_CLIENT_ID }}"
@@ -49,7 +43,7 @@ jobs:
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
       with:
-        terraform_version: "1.7.5"
+        terraform_version: "1.12.2"
 
     - name: Setup Backend Storage
       id: storage
@@ -83,80 +77,46 @@ jobs:
         # Save storage account name for later steps
         echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
 
+    - name: Get Hub List
+      id: hubs
+      run: |
+        # Get list of hub config files
+        HUB_FILES=$(ls ../config/hubs/*.yaml)
+        HUB_NAMES=""
+        for file in $HUB_FILES; do
+          HUB_NAME=$(basename "$file" .yaml)
+          HUB_NAMES="$HUB_NAMES $HUB_NAME"
+        done
+        echo "hub_names=$HUB_NAMES" >> $GITHUB_OUTPUT
+
     - name: Terraform Format
       id: fmt
       run: terraform fmt -check
 
-    - name: Terraform Init
-      id: init
-      run: |
-        # Create backend.tf file
-        cat > backend.tf << EOF
-        terraform {
-          backend "azurerm" {
-            resource_group_name  = "rg-terraform-state"
-            storage_account_name = "${{ steps.storage.outputs.storage_account }}"
-            container_name       = "tfstate"
-            key                  = "vwan.tfstate"
-            use_oidc            = true
-          }
-        }
-        EOF
-        terraform init
-
-    - name: Terraform Validate
-      id: validate
-      run: terraform validate
-
-    - name: Terraform Plan
-      id: plan
-      if: github.event_name == 'pull_request'
-      run: |
-        terraform plan -no-color \
-          -var="client_id=${{ secrets.AZURE_CLIENT_ID }}" \
-          -var="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
-          -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
-          -var="environment=prod"
-      continue-on-error: true
-
-    - name: Update Pull Request
-      if: github.event_name == 'pull_request' && github.event.pull_request.number != null
-      uses: actions/github-script@v7
-      env:
-        PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
-      with:
-        github-token: ${{ secrets.GITHUB_TOKEN }}
-        script: |
-          try {
-            const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
-            #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
-            #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
-            #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
-
-            <details><summary>Show Plan</summary>
-
-            \`\`\`\n
-            ${process.env.PLAN}
-            \`\`\`
-
-            </details>`;
-
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.name,
-              issue_number: context.issue.number,
-              body: output
-            });
-          } catch (error) {
-            console.error('Error creating comment:', error.message);
-            // Don't fail the workflow if comment creation fails
-          }
-
     - name: Terraform Apply
-      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       run: |
-        terraform apply -auto-approve \
-          -var="client_id=${{ secrets.AZURE_CLIENT_ID }}" \
-          -var="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
-          -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
-          -var="environment=prod" 
+        # Process each hub
+        for hub in ${{ steps.hubs.outputs.hub_names }}; do
+          echo "Processing hub: $hub"
+          
+          # Create backend.tf file for each hub
+          cat > backend.tf << EOF
+          terraform {
+            backend "azurerm" {
+              resource_group_name  = "rg-terraform-state"
+              storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+              container_name       = "tfstate"
+              key                  = "prod/${hub}.tfstate"
+              use_oidc            = true
+            }
+          }
+          EOF
+          
+          terraform init -reconfigure
+          terraform apply -auto-approve \
+            -var="client_id=${{ secrets.AZURE_CLIENT_ID }}" \
+            -var="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
+            -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            -var="environment=prod" \
+            -var="hub_name=${hub}"
+        done 
