@@ -152,5 +152,10 @@ jobs:
           env | grep TF_VAR
           
           echo "Debug: About to run terraform apply..."
+          
+          # Break any existing blob leases that might be causing issues
+          echo "Breaking any existing blob leases..."
+          az storage blob lease break --container-name tfstate --name "prod/${hub}.tfstate" --account-name ${{ steps.storage.outputs.storage_account }} 2>/dev/null || echo "No existing lease to break or blob doesn't exist"
+          
           terraform apply -auto-approve -var="client_id=${{ secrets.AZURE_CLIENT_ID }}" -var="tenant_id=${{ secrets.AZURE_TENANT_ID }}" -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" -var="environment=prod" -var="hub_name=${hub}" -input=false -lock=false
         done 
