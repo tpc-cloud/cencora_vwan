@@ -55,7 +55,7 @@ jobs:
       run: |
         # Set variables
         RESOURCE_GROUP="rg-tf-state"
-        STORAGE_ACCOUNT="sttfstate${GITHUB_REPOSITORY//\//}prod"
+        STORAGE_ACCOUNT="sttfstatecencoraprod"
         CONTAINER_NAME="tfstate"
         LOCATION="eastus"
 
