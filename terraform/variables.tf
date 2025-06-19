@@ -21,6 +21,7 @@ variable "environment" {
 variable "hub_name" {
   description = "The name of the hub being deployed"
   type        = string
+  default     = "core"
 }
 
 variable "location" {
