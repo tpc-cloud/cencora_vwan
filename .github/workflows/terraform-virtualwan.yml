@@ -126,17 +126,15 @@ jobs:
           cp main-hubs.tf hub-${hub}/main.tf
           
           # Create backend.tf file for this hub
-          cat > hub-${hub}/backend.tf << 'EOF'
-        terraform {
-          backend "azurerm" {
-            resource_group_name  = "rg-tf-state"
-            storage_account_name = "STORAGE_ACCOUNT_PLACEHOLDER"
-            container_name       = "tfstate"
-            key                  = "HUB_NAME_PLACEHOLDER"
-            use_oidc             = true
-          }
-        }
-        EOF
+          echo "terraform {" > hub-${hub}/backend.tf
+          echo "  backend \"azurerm\" {" >> hub-${hub}/backend.tf
+          echo "    resource_group_name  = \"rg-tf-state\"" >> hub-${hub}/backend.tf
+          echo "    storage_account_name = \"STORAGE_ACCOUNT_PLACEHOLDER\"" >> hub-${hub}/backend.tf
+          echo "    container_name       = \"tfstate\"" >> hub-${hub}/backend.tf
+          echo "    key                  = \"HUB_NAME_PLACEHOLDER\"" >> hub-${hub}/backend.tf
+          echo "    use_oidc             = true" >> hub-${hub}/backend.tf
+          echo "  }" >> hub-${hub}/backend.tf
+          echo "}" >> hub-${hub}/backend.tf
           
           # Replace placeholders with actual values
           sed -i "s/STORAGE_ACCOUNT_PLACEHOLDER/${{ steps.storage.outputs.storage_account }}/g" hub-${hub}/backend.tf
