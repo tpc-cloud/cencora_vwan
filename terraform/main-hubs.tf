@@ -43,14 +43,14 @@ locals {
 
 # Create Virtual Hub for the specific hub
 resource "azurerm_virtual_hub" "hub" {
-  name                = local.hub_config.name
-  resource_group_name = data.azurerm_resource_group.vwan.name
-  location            = var.location
-  address_prefix      = local.hub_config.address_prefix
-  virtual_wan_id      = data.azurerm_virtual_wan.vwan.id
-  sku                 = local.hub_config.sku
+  name                   = local.hub_config.name
+  resource_group_name    = data.azurerm_resource_group.vwan.name
+  location               = var.location
+  address_prefix         = local.hub_config.address_prefix
+  virtual_wan_id         = data.azurerm_virtual_wan.vwan.id
+  sku                    = local.hub_config.sku
   hub_routing_preference = local.hub_config.hub_routing_preference
-  tags                = var.tags
+  tags                   = var.tags
 }
 
 # Create VPN Gateway if specified in hub config
