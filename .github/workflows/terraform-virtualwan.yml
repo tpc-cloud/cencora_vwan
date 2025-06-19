@@ -125,11 +125,13 @@ jobs:
           terraform import azurerm_resource_group.vwan /subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-prod || echo "Resource group import failed or not needed"
           
           echo "Running terraform apply for hub: $hub"
-          terraform apply -auto-approve \
-            -var="client_id=${{ secrets.AZURE_CLIENT_ID }}" \
-            -var="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
-            -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
-            -var="environment=prod" \
-            -var="hub_name=${hub}" \
-            -input=false
+          
+          # Create terraform.tfvars file
+          echo "client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"" > terraform.tfvars
+          echo "tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"" >> terraform.tfvars
+          echo "subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"" >> terraform.tfvars
+          echo "environment = \"prod\"" >> terraform.tfvars
+          echo "hub_name = \"${hub}\"" >> terraform.tfvars
+          
+          terraform apply -auto-approve -var-file="terraform.tfvars"
         done 
