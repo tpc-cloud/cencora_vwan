@@ -154,6 +154,24 @@ The configuration deploys a comprehensive Virtual WAN setup with:
    - Push changes to main branch
    - The hub workflow will automatically run and deploy only the changed hubs
 
+### Importing Existing Resources
+
+If you have existing Azure resources that were created outside of Terraform, the workflows will automatically attempt to import them. However, if you need to manually import resources, you can use the provided script:
+
+```bash
+# Make sure you're in the terraform directory
+cd terraform
+
+# Run the import script
+../scripts/import-existing-resources.sh prod <your-subscription-id>
+```
+
+The script will:
+- Check for existing resource groups
+- Check for existing Virtual WAN resources
+- Check for existing Virtual Hubs
+- Import any found resources into Terraform state
+
 ### Ongoing Management
 
 1. **Adding a new hub**:

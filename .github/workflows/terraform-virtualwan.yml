@@ -157,6 +157,17 @@ jobs:
           # Run terraform in the hub directory
           cd hub-${hub}
           terraform init -reconfigure
+          
+          # Check if Virtual Hub exists and import it if needed
+          echo "Checking if Virtual Hub exists for ${hub}..."
+          HUB_NAME=$(grep "name:" ../config/hubs/${hub}.yaml | head -1 | sed 's/.*name: *"\([^"]*\)".*/\1/' | sed 's/\${environment}/prod/g')
+          if az network vhub show --name "$HUB_NAME" --resource-group "rg-vwan-prod" >/dev/null 2>&1; then
+            echo "Virtual Hub exists, importing into Terraform state..."
+            terraform import azurerm_virtual_hub.hub "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-prod/providers/Microsoft.Network/virtualHubs/$HUB_NAME" || echo "Import failed or resource already in state"
+          else
+            echo "Virtual Hub does not exist, will be created by Terraform"
+          fi
+          
           terraform apply -auto-approve -var-file="terraform.tfvars" -input=false -lock=false
           cd ..
         done 

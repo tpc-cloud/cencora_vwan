@@ -132,6 +132,24 @@ jobs:
         # Break any existing blob leases
         echo "Breaking any existing blob leases..."
         az storage blob lease break --container-name tfstate --blob-name "${{ github.event.inputs.environment }}/vwan-core.tfstate" --account-name ${{ steps.storage.outputs.storage_account }} 2>/dev/null || echo "No existing lease to break or blob doesn't exist"
+        
+        # Check if resource group exists and import it if needed
+        echo "Checking if resource group rg-vwan-${{ github.event.inputs.environment }} exists..."
+        if az group show --name "rg-vwan-${{ github.event.inputs.environment }}" >/dev/null 2>&1; then
+          echo "Resource group exists, importing into Terraform state..."
+          terraform import azurerm_resource_group.vwan "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-${{ github.event.inputs.environment }}" || echo "Import failed or resource already in state"
+        else
+          echo "Resource group does not exist, will be created by Terraform"
+        fi
+        
+        # Check if Virtual WAN exists and import it if needed
+        echo "Checking if Virtual WAN vwan-${{ github.event.inputs.environment }} exists..."
+        if az network vwan show --name "vwan-${{ github.event.inputs.environment }}" --resource-group "rg-vwan-${{ github.event.inputs.environment }}" >/dev/null 2>&1; then
+          echo "Virtual WAN exists, importing into Terraform state..."
+          terraform import azurerm_virtual_wan.vwan "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-${{ github.event.inputs.environment }}/providers/Microsoft.Network/virtualWans/vwan-${{ github.event.inputs.environment }}" || echo "Import failed or resource already in state"
+        else
+          echo "Virtual WAN does not exist, will be created by Terraform"
+        fi
           
         echo "Creating Virtual WAN core infrastructure..."
           
