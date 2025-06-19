@@ -17,7 +17,6 @@ env:
   ARM_CLIENT_ID: "${{ secrets.AZURE_CLIENT_ID }}"
   ARM_SUBSCRIPTION_ID: "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
   ARM_TENANT_ID: "${{ secrets.AZURE_TENANT_ID }}"
-  TF_WORKSPACE: "default"
 
 jobs:
   terraform:
@@ -134,8 +133,18 @@ jobs:
           
           echo "Debug: Hub name being passed: ${hub}"
           
-          # Create a simple tfvars file for hub_name
-          echo "hub_name = \"${hub}\"" > hub.tfvars
+          # Create a comprehensive tfvars file with all variables
+          echo "client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"" > terraform.tfvars
+          echo "tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"" >> terraform.tfvars
+          echo "subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"" >> terraform.tfvars
+          echo "environment = \"prod\"" >> terraform.tfvars
+          echo "hub_name = \"${hub}\"" >> terraform.tfvars
           
-          terraform apply -auto-approve -input=false -var-file="hub.tfvars"
+          echo "Debug: Contents of terraform.tfvars:"
+          cat terraform.tfvars
+          
+          echo "Debug: Environment variables:"
+          env | grep TF_VAR
+          
+          terraform apply -auto-approve -input=false
         done 
