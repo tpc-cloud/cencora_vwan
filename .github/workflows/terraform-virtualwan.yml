@@ -81,7 +81,7 @@ jobs:
       id: hubs
       run: |
         # Get list of hub config files
-        HUB_FILES=$(ls ../config/hubs/*.yaml)
+        HUB_FILES=$(ls config/hubs/*.yaml)
         HUB_NAMES=""
         for file in $HUB_FILES; do
           HUB_NAME=$(basename "$file" .yaml)
