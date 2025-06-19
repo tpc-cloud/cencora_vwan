@@ -133,5 +133,10 @@ jobs:
           echo "environment = \"prod\"" >> terraform.tfvars
           echo "hub_name = \"${hub}\"" >> terraform.tfvars
           
+          echo "Debug: Checking terraform.tfvars content:"
+          cat terraform.tfvars
+          
+          echo "Debug: Client ID length: ${#AZURE_CLIENT_ID}"
+          
           terraform apply -auto-approve -var-file="terraform.tfvars"
         done 
