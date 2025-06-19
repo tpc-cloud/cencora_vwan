@@ -131,8 +131,16 @@ jobs:
         echo "environment = \"${{ github.event.inputs.environment }}\"" >> terraform.tfvars
         echo "hub_name = \"vwan-core\"" >> terraform.tfvars
         
-        # Remove other .tf files to avoid conflicts, then copy the Virtual WAN core Terraform configuration
-        rm -f main.tf main-hubs.tf
+        # Debug: Show what .tf files exist before cleanup
+        echo "Debug: .tf files before cleanup:"
+        ls -la *.tf
+        
+        # Remove only the main configuration files to avoid conflicts, keep variables.tf and backend.tf
+        rm -f main.tf main-hubs.tf main-vwan-core.tf
         cp main-vwan-core.tf main.tf
+        
+        # Debug: Show what .tf files exist after cleanup
+        echo "Debug: .tf files after cleanup:"
+        ls -la *.tf
         
         terraform apply -auto-approve -var-file="terraform.tfvars" -input=false -lock=false 
