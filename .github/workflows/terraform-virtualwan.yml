@@ -158,4 +158,5 @@ jobs:
           cd hub-${hub}
           terraform init -reconfigure
           terraform apply -auto-approve -var-file="terraform.tfvars" -input=false -lock=false
-          cd .. 
+          cd ..
+        done 
