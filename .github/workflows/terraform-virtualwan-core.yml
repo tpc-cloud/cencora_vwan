@@ -135,12 +135,17 @@ jobs:
         echo "Debug: .tf files before cleanup:"
         ls -la *.tf
         
-        # Remove only the main configuration files to avoid conflicts, keep variables.tf and backend.tf
-        rm -f main.tf main-hubs.tf main-vwan-core.tf
-        cp main-vwan-core.tf main.tf
+        # Create a clean working directory with only the files we need
+        mkdir -p temp_terraform
+        cp variables.tf temp_terraform/
+        cp backend.tf temp_terraform/
+        cp main-vwan-core.tf temp_terraform/main.tf
         
-        # Debug: Show what .tf files exist after cleanup
-        echo "Debug: .tf files after cleanup:"
+        # Move to the clean directory
+        cd temp_terraform
+        
+        # Debug: Show what .tf files exist in clean directory
+        echo "Debug: .tf files in clean directory:"
         ls -la *.tf
         
-        terraform apply -auto-approve -var-file="terraform.tfvars" -input=false -lock=false 
+        terraform apply -auto-approve -var-file="../terraform.tfvars" -input=false -lock=false 
