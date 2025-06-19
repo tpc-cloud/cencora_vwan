@@ -1,6 +1,22 @@
 # Azure Virtual WAN Deployment
 
-This repository contains Terraform configurations and GitHub Actions workflows to deploy and manage Azure Virtual WAN infrastructure using the Azure Verified Module. The configuration supports multiple Virtual Hubs with different routing preferences and associated gateways.
+This repository contains Terraform configurations and GitHub Actions workflows to deploy and manage Azure Virtual WAN infrastructure. The architecture separates the Virtual WAN core infrastructure from individual hub deployments, allowing for targeted updates and better resource management.
+
+## Architecture Overview
+
+The deployment is split into two distinct workflows:
+
+### 1. Virtual WAN Core (`terraform-virtualwan-core.yml`)
+- **Purpose**: Creates the Virtual WAN itself (runs once)
+- **Trigger**: Manual workflow dispatch
+- **State File**: `prod/vwan-core.tfstate`
+- **Resources**: Virtual WAN resource only
+
+### 2. Virtual WAN Hubs (`terraform-virtualwan.yml`)
+- **Purpose**: Creates individual hubs within the existing Virtual WAN
+- **Trigger**: Automatic on push to main (when hub configs change)
+- **State Files**: `prod/hub1.tfstate`, `prod/hub2.tfstate`, etc.
+- **Resources**: Virtual Hub, VPN Gateway, ExpressRoute Gateway for specific hub
 
 ## Prerequisites
 
@@ -43,25 +59,7 @@ az ad app federated-credential create \
    - `AZURE_TENANT_ID`: Azure Tenant ID
    - `AZURE_SUBSCRIPTION_ID`: Azure Subscription ID
 
-3. Create the Azure Storage Account for Terraform state:
-
-```bash
-# Create Resource Group
-az group create --name terraform-state-rg --location eastus
-
-# Create Storage Account
-az storage account create \
-  --name tfstate<random-string> \
-  --resource-group terraform-state-rg \
-  --location eastus \
-  --sku Standard_LRS \
-  --encryption-services blob
-
-# Create Container
-az storage container create \
-  --name tfstate \
-  --account-name tfstate<random-string>
-```
+3. The Terraform state storage account will be created automatically by the workflows.
 
 ## Configuration
 
@@ -101,6 +99,11 @@ express_route_gateway:
 
 The configuration deploys a comprehensive Virtual WAN setup with:
 
+### Virtual WAN Core
+- Single Virtual WAN resource per environment
+- Standard SKU
+- Centralized management
+
 ### Virtual Hubs
 - **Hub 1 (ASPath)**
   - Address Space: 10.0.0.0/24
@@ -135,46 +138,96 @@ The configuration deploys a comprehensive Virtual WAN setup with:
 - ExpressRoute: Optimized for ExpressRoute connections
 - VPNGateway: Optimized for VPN connections
 
-## Usage
+## Deployment Process
 
-1. The GitHub Actions workflow will automatically run on:
+### Initial Setup
+
+1. **Deploy Virtual WAN Core**:
+   - Go to Actions → "Terraform Virtual WAN Core"
+   - Click "Run workflow"
+   - Select environment (prod, dev, test)
+   - Click "Run workflow"
+   - This creates the Virtual WAN infrastructure
+
+2. **Deploy Hubs**:
+   - Modify hub configuration files in `terraform/config/hubs/`
+   - Push changes to main branch
+   - The hub workflow will automatically run and deploy only the changed hubs
+
+### Ongoing Management
+
+1. **Adding a new hub**:
+   - Create a new YAML file in `terraform/config/hubs/`
+   - Follow the configuration structure
    - Push to main branch
-   - Pull requests to main branch
-   - Changes to terraform/** files
+   - Only the new hub will be deployed
 
-2. The workflow will:
-   - Format and validate Terraform code
-   - Plan changes on pull requests
-   - Apply changes when merged to main
+2. **Modifying existing hubs**:
+   - Edit the corresponding YAML file
+   - Push to main branch
+   - Only the modified hub will be updated
 
-3. To deploy changes:
-   - Create a new branch
-   - Make your changes
-   - Create a pull request
-   - Review the plan output in the PR
-   - Merge to main to apply changes
+3. **Removing a hub**:
+   - Delete the corresponding YAML file
+   - Push to main branch
+   - The hub will be destroyed
+
+## Workflow Details
+
+### Virtual WAN Core Workflow
+- **Trigger**: Manual (workflow_dispatch)
+- **Purpose**: Create Virtual WAN infrastructure
+- **State**: `prod/vwan-core.tfstate`
+- **Frequency**: Run once per environment
+
+### Virtual WAN Hubs Workflow
+- **Trigger**: Automatic on push to main
+- **Purpose**: Deploy individual hubs
+- **State**: Separate state files per hub (`prod/hub1.tfstate`, etc.)
+- **Intelligence**: Only processes changed hub configurations
+
+## Benefits
+
+- ✅ **Virtual WAN created once**: No duplicate Virtual WAN resources
+- ✅ **Individual hub management**: Each hub is managed independently
+- ✅ **Targeted deployments**: Only process changed hub configurations
+- ✅ **Separate state files**: Each hub has its own state for isolation
+- ✅ **Clear separation**: Core infrastructure vs. hub infrastructure
+- ✅ **Faster deployments**: Only update what changed
+- ✅ **Reduced risk**: Changes to one hub don't affect others
 
 ## Customization
 
 You can customize the deployment by modifying the hub configuration files:
 
-1. Adding a new hub:
+1. **Adding a new hub**:
    - Create a new YAML file in `terraform/config/hubs/`
    - Follow the configuration structure
    - The hub will be automatically included in the deployment
 
-2. Modifying existing hubs:
+2. **Modifying existing hubs**:
    - Edit the corresponding YAML file
    - Update settings as needed
    - Changes will be applied on next deployment
 
-3. Removing a hub:
+3. **Removing a hub**:
    - Delete the corresponding YAML file
    - The hub will be removed on next deployment
 
-4. Environment-specific settings:
+4. **Environment-specific settings**:
    - Use ${environment} variable in names
    - Configure different settings per environment
+
+## Destroy Infrastructure
+
+To destroy the infrastructure, use the destroy workflow:
+
+1. Go to Actions → "Terraform Virtual WAN Destroy"
+2. Click "Run workflow"
+3. Select the environment to destroy
+4. Click "Run workflow"
+
+**Warning**: This will destroy all Virtual WAN infrastructure for the selected environment.
 
 ## Contributing
 

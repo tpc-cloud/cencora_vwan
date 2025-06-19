@@ -23,51 +23,48 @@ data "azurerm_resource_group" "vwan" {
 }
 
 locals {
-  # Get all hub configuration files
-  hub_files = fileset("${path.module}/config/hubs", "*.yaml")
+  # Get specific hub configuration file based on hub_name variable
+  hub_file = "${var.hub_name}.yaml"
 
-  # Read and parse each hub configuration
-  hub_configs = {
-    for hub_file in local.hub_files :
-    trimsuffix(hub_file, ".yaml") => yamldecode(
-      replace(
-        file("${path.module}/config/hubs/${hub_file}"),
-        "$${environment}",
-        var.environment
-      )
+  # Read and parse the specific hub configuration
+  hub_config = yamldecode(
+    replace(
+      file("${path.module}/config/hubs/${local.hub_file}"),
+      "$${environment}",
+      var.environment
     )
-  }
+  )
 
   virtual_hubs = {
-    for hub_key, hub in local.hub_configs : hub_key => {
-      name                   = hub.name
+    "${var.hub_name}" => {
+      name                   = local.hub_config.name
       resource_group         = data.azurerm_resource_group.vwan.name
       location               = var.location
-      address_prefix         = hub.address_prefix
-      sku                    = hub.sku
-      hub_routing_preference = hub.hub_routing_preference
+      address_prefix         = local.hub_config.address_prefix
+      sku                    = local.hub_config.sku
+      hub_routing_preference = local.hub_config.hub_routing_preference
     }
   }
 
   vpn_gateways = {
-    for hub_key, hub in local.hub_configs : "${hub_key}-vpngw" => {
-      name                = hub.vpn_gateway.name
-      virtual_hub_key     = hub_key
+    "${var.hub_name}-vpngw" => {
+      name                = local.hub_config.vpn_gateway.name
+      virtual_hub_key     = var.hub_name
       resource_group_name = data.azurerm_resource_group.vwan.name
       location            = var.location
-      scale_unit          = hub.vpn_gateway.scale_unit
+      scale_unit          = local.hub_config.vpn_gateway.scale_unit
     }
   }
 
-  express_route_gateways = {
-    for hub_key, hub in local.hub_configs : "${hub_key}-ergw" => {
-      name                = hub.express_route_gateway.name
-      virtual_hub_key     = hub_key
+  express_route_gateways = contains(keys(local.hub_config), "express_route_gateway") ? {
+    "${var.hub_name}-ergw" => {
+      name                = local.hub_config.express_route_gateway.name
+      virtual_hub_key     = var.hub_name
       resource_group_name = data.azurerm_resource_group.vwan.name
       location            = var.location
-      scale_unit          = hub.express_route_gateway.scale_unit
-    } if contains(keys(hub), "express_route_gateway")
-  }
+      scale_unit          = local.hub_config.express_route_gateway.scale_unit
+    }
+  } : {}
 }
 
 module "virtual_wan" {

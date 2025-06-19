@@ -1,4 +1,4 @@
-name: 'Terraform Virtual WAN'
+name: 'Terraform Virtual WAN Hubs'
 
 on:
   push:
@@ -19,8 +19,8 @@ env:
   ARM_TENANT_ID: "${{ secrets.AZURE_TENANT_ID }}"
 
 jobs:
-  terraform:
-    name: 'Terraform'
+  terraform-hubs:
+    name: 'Terraform Virtual WAN Hubs'
     runs-on: ubuntu-latest
     environment: production
 
@@ -86,17 +86,29 @@ jobs:
         # Save storage account name for later steps
         echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
 
-    - name: Get Hub List
-      id: hubs
+    - name: Get Changed Hub Files
+      id: changed_hubs
       run: |
-        # Get list of hub config files
-        HUB_FILES=$(ls config/hubs/*.yaml)
+        # Get list of changed hub config files
+        CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep "config/hubs/.*\.yaml" || echo "")
+        
+        if [ -z "$CHANGED_FILES" ]; then
+          # If no specific hub files changed, process all hubs
+          HUB_FILES=$(ls config/hubs/*.yaml)
+          echo "No specific hub files changed, processing all hubs"
+        else
+          # Process only changed hub files
+          HUB_FILES="$CHANGED_FILES"
+          echo "Processing only changed hub files: $HUB_FILES"
+        fi
+        
         HUB_NAMES=""
         for file in $HUB_FILES; do
           HUB_NAME=$(basename "$file" .yaml)
           HUB_NAMES="$HUB_NAMES $HUB_NAME"
         done
         echo "hub_names=$HUB_NAMES" >> $GITHUB_OUTPUT
+        echo "Processing hubs: $HUB_NAMES"
 
     - name: Terraform Format
       id: fmt
@@ -105,7 +117,7 @@ jobs:
     - name: Terraform Apply
       run: |
         # Process each hub
-        for hub in ${{ steps.hubs.outputs.hub_names }}; do
+        for hub in ${{ steps.changed_hubs.outputs.hub_names }}; do
           echo "Processing hub: $hub"
           
           # Create backend.tf file for each hub
@@ -150,6 +162,9 @@ jobs:
           # Break any existing blob leases that might be causing issues
           echo "Breaking any existing blob leases..."
           az storage blob lease break --container-name tfstate --blob-name "prod/${hub}.tfstate" --account-name ${{ steps.storage.outputs.storage_account }} 2>/dev/null || echo "No existing lease to break or blob doesn't exist"
+          
+          # Copy the hub-specific Terraform configuration
+          cp main-hubs.tf main.tf
           
           terraform apply -auto-approve -var-file="terraform.tfvars" -input=false -lock=false
         done 
