@@ -1,0 +1,5 @@
+name: "corp-vnet4-${environment}"
+address_prefix: "10.7.0.0/16"
+subnets:
+  - name: "default"
+    prefix: "10.7.0.0/24"

@@ -1,0 +1,8 @@
+name: "vnetconn-corp3-${environment}"
+virtual_network_name: "corp-vnet3-${environment}"
+vhub_name: "hub3-${environment}"
+enable_internet_security: true
+routing_configuration:
+  associated_route_table: null
+  propagated_route_tables:
+    - "default"

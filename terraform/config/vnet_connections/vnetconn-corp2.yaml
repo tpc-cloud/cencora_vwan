@@ -1,0 +1,8 @@
+name: "vnetconn-corp2-${environment}"
+virtual_network_name: "corp-vnet2-${environment}"
+vhub_name: "hub2-${environment}"
+enable_internet_security: true
+routing_configuration:
+  associated_route_table: null
+  propagated_route_tables:
+    - "default"

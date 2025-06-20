@@ -1,0 +1,139 @@
+name: 'Terraform Virtual WAN VNets'
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'terraform/**'
+      - 'config/vnets/**'
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  ARM_CLIENT_ID: "${{ secrets.AZURE_CLIENT_ID }}"
+  ARM_SUBSCRIPTION_ID: "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+  ARM_TENANT_ID: "${{ secrets.AZURE_TENANT_ID }}"
+
+jobs:
+  terraform-vnets:
+    name: 'Terraform Virtual WAN VNets'
+    runs-on: ubuntu-latest
+    environment: production
+
+    env:
+      TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_environment: "prod"
+
+    defaults:
+      run:
+        working-directory: ./terraform
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Azure Login
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: "1.12.2"
+
+    - name: Setup Backend Storage
+      id: storage
+      run: |
+        RESOURCE_GROUP="rg-tf-state"
+        STORAGE_ACCOUNT="sttfstatecencoraprod"
+        CONTAINER_NAME="tfstate"
+        LOCATION="eastus"
+
+        az group create --name $RESOURCE_GROUP --location $LOCATION
+        if ! az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
+          az storage account create \
+              --name $STORAGE_ACCOUNT \
+              --resource-group $RESOURCE_GROUP \
+              --location $LOCATION \
+              --sku Standard_LRS \
+              --encryption-services blob
+        fi
+        az storage container create \
+            --name $CONTAINER_NAME \
+            --account-name $STORAGE_ACCOUNT
+        echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
+
+    - name: Get Changed VNet Files
+      id: changed_vnets
+      run: |
+        CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep "config/vnets/.*\.yaml" || echo "")
+        if [ -z "$CHANGED_FILES" ]; then
+          VNET_FILES=$(ls config/vnets/*.yaml)
+          echo "No specific vnet files changed, processing all VNets"
+        else
+          VNET_FILES="$CHANGED_FILES"
+          echo "Processing only changed vnet files: $VNET_FILES"
+        fi
+
+        VNET_NAMES=""
+        for file in $VNET_FILES; do
+          VNET_NAME=$(basename "$file" .yaml)
+          VNET_NAMES="$VNET_NAMES $VNET_NAME"
+        done
+        echo "vnet_names=$VNET_NAMES" >> $GITHUB_OUTPUT
+
+    - name: Terraform Format
+      run: terraform fmt -check
+
+    - name: Terraform Apply VNets
+      run: |
+        for vnet in ${{ steps.changed_vnets.outputs.vnet_names }}; do
+          echo "Processing VNet: $vnet"
+          mkdir -p vnet-${vnet}
+          cp variables.tf vnet-${vnet}/
+          cp main-vnets.tf vnet-${vnet}/main.tf
+
+          # Create backend.tf
+          cat > vnet-${vnet}/backend.tf <<EOF
+          terraform {
+            backend "azurerm" {
+              resource_group_name  = "rg-tf-state"
+              storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+              container_name       = "tfstate"
+              key                  = "prod/${vnet}.tfstate"
+              use_oidc             = true
+            }
+          }
+          EOF
+
+          # Create terraform.tfvars
+          cat > vnet-${vnet}/terraform.tfvars <<EOF
+          client_id = "${{ secrets.AZURE_CLIENT_ID }}"
+          tenant_id = "${{ secrets.AZURE_TENANT_ID }}"
+          subscription_id = "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+          environment = "prod"
+          vnet_name = "${vnet}"
+          EOF
+
+                    cd vnet-${vnet}
+                    terraform init -reconfigure
+
+                    echo "Checking if VNet exists..."
+                    if az network vnet show --name "$vnet" --resource-group "rg-vwan-prod" >/dev/null 2>&1; then
+                      echo "Importing existing VNet..."
+                      terraform import azurerm_virtual_network.vnet "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-prod/providers/Microsoft.Network/virtualNetworks/$vnet" || echo "Import failed or already in state"
+                    else
+                      echo "VNet will be created by Terraform"
+                    fi
+
+                    terraform apply -auto-approve -var-file="terraform.tfvars" -input=false -lock=false
+                    cd ..
+                  done

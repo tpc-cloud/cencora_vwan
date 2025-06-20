@@ -45,3 +45,8 @@ variable "config_format" {
     error_message = "Config format must be either 'json' or 'yaml'."
   }
 } 
+
+variable "vnet_name" {
+  description = "The name of the VNet (e.g. corp-vnet1)"
+  type        = string
+}
