@@ -103,21 +103,21 @@ resource "azurerm_firewall_policy_rule_collection_group" "vwan" {
 
 # Create Network Rule Collection
 resource "azurerm_firewall_policy_rule_collection" "network_rules" {
-  name                = "network-rules"
-  firewall_policy_id  = azurerm_firewall_policy.vwan.id
+  name                     = "network-rules"
+  firewall_policy_id       = azurerm_firewall_policy.vwan.id
   rule_collection_group_id = azurerm_firewall_policy_rule_collection_group.vwan.id
-  priority            = 100
-  rule_collection_type = "FirewallPolicyFilterRuleCollection"
+  priority                 = 100
+  rule_collection_type     = "FirewallPolicyFilterRuleCollection"
 
   rule {
     name = "allow-https"
     protocols {
       protocol_type = "Https"
     }
-    source_addresses  = ["*"]
+    source_addresses      = ["*"]
     destination_addresses = ["*"]
-    destination_ports = ["443"]
-    action = "Allow"
+    destination_ports     = ["443"]
+    action                = "Allow"
   }
 
   rule {
@@ -125,20 +125,20 @@ resource "azurerm_firewall_policy_rule_collection" "network_rules" {
     protocols {
       protocol_type = "Http"
     }
-    source_addresses  = ["*"]
+    source_addresses      = ["*"]
     destination_addresses = ["*"]
-    destination_ports = ["80"]
-    action = "Allow"
+    destination_ports     = ["80"]
+    action                = "Allow"
   }
 }
 
 # Create Application Rule Collection
 resource "azurerm_firewall_policy_rule_collection" "application_rules" {
-  name                = "application-rules"
-  firewall_policy_id  = azurerm_firewall_policy.vwan.id
+  name                     = "application-rules"
+  firewall_policy_id       = azurerm_firewall_policy.vwan.id
   rule_collection_group_id = azurerm_firewall_policy_rule_collection_group.vwan.id
-  priority            = 200
-  rule_collection_type = "FirewallPolicyFilterRuleCollection"
+  priority                 = 200
+  rule_collection_type     = "FirewallPolicyFilterRuleCollection"
 
   rule {
     name = "allow-azure-services"
@@ -148,14 +148,14 @@ resource "azurerm_firewall_policy_rule_collection" "application_rules" {
     }
     source_addresses  = ["*"]
     destination_fqdns = ["*.azure.com", "*.microsoft.com"]
-    action = "Allow"
+    action            = "Allow"
   }
 }
 
 # Use the firewall rules module to apply comprehensive rules from YAML config
 module "firewall_rules" {
   source = "./modules/firewall-rules"
-  
+
   config_file_path   = "${path.module}/firewall-config/firewall-rules.yaml"
   firewall_policy_id = azurerm_firewall_policy.vwan.id
   tags               = var.tags

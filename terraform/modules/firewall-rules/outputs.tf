@@ -20,7 +20,9 @@ output "nat_rule_collections" {
 
 output "total_rules_created" {
   description = "Total number of firewall rules created"
-  value       = length(azurerm_firewall_policy_rule_collection.network_rules) + 
-                length(azurerm_firewall_policy_rule_collection.application_rules) + 
-                length(azurerm_firewall_policy_rule_collection.nat_rules)
+  value = (
+    try(length(azurerm_firewall_policy_rule_collection.network_rules), 0) +
+    try(length(azurerm_firewall_policy_rule_collection.application_rules), 0) +
+    try(length(azurerm_firewall_policy_rule_collection.nat_rules), 0)
+  )
 } 
