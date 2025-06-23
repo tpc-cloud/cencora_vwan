@@ -1,0 +1,185 @@
+# Sample Firewall Rules Configuration
+# This file defines the firewall rules for the Virtual WAN core firewall
+
+firewall_policy:
+  name: "fw-policy-${environment}"
+  location: "${location}"
+  resource_group: "rg-vwan-${environment}"
+
+# Network Rule Collections
+network_rule_collections:
+  - name: "allow-internet-access"
+    priority: 100
+    action: "Allow"
+    rules:
+      - name: "allow-https"
+        protocols:
+          - type: "Https"
+        source_addresses: ["*"]
+        destination_addresses: ["*"]
+        destination_ports: ["443"]
+        description: "Allow HTTPS traffic to internet"
+      
+      - name: "allow-http"
+        protocols:
+          - type: "Http"
+        source_addresses: ["*"]
+        destination_addresses: ["*"]
+        destination_ports: ["80"]
+        description: "Allow HTTP traffic to internet"
+      
+      - name: "allow-dns"
+        protocols:
+          - type: "Udp"
+        source_addresses: ["*"]
+        destination_addresses: ["8.8.8.8", "8.8.4.4", "168.63.129.16"]
+        destination_ports: ["53"]
+        description: "Allow DNS queries to Google DNS and Azure DNS"
+
+  - name: "allow-azure-services"
+    priority: 200
+    action: "Allow"
+    rules:
+      - name: "allow-azure-storage"
+        protocols:
+          - type: "Https"
+        source_addresses: ["*"]
+        destination_addresses: ["*"]
+        destination_ports: ["443"]
+        destination_fqdns: ["*.blob.core.windows.net", "*.file.core.windows.net"]
+        description: "Allow access to Azure Storage services"
+      
+      - name: "allow-azure-key-vault"
+        protocols:
+          - type: "Https"
+        source_addresses: ["*"]
+        destination_addresses: ["*"]
+        destination_ports: ["443"]
+        destination_fqdns: ["*.vault.azure.net"]
+        description: "Allow access to Azure Key Vault"
+
+  - name: "allow-ntp"
+    priority: 300
+    action: "Allow"
+    rules:
+      - name: "allow-ntp-sync"
+        protocols:
+          - type: "Udp"
+        source_addresses: ["*"]
+        destination_addresses: ["time.windows.com", "time.nist.gov"]
+        destination_ports: ["123"]
+        description: "Allow NTP synchronization"
+
+# Application Rule Collections
+application_rule_collections:
+  - name: "allow-azure-services"
+    priority: 100
+    action: "Allow"
+    rules:
+      - name: "allow-azure-platform"
+        protocols:
+          - port: 443
+            type: "Https"
+        source_addresses: ["*"]
+        destination_fqdns: 
+          - "*.azure.com"
+          - "*.microsoft.com"
+          - "*.azureedge.net"
+          - "*.azurewebsites.net"
+        description: "Allow access to Azure platform services"
+      
+      - name: "allow-azure-monitoring"
+        protocols:
+          - port: 443
+            type: "Https"
+        source_addresses: ["*"]
+        destination_fqdns:
+          - "*.ods.opinsights.azure.com"
+          - "*.oms.opinsights.azure.com"
+          - "*.applicationinsights.azure.com"
+        description: "Allow Azure monitoring and logging services"
+
+  - name: "allow-common-services"
+    priority: 200
+    action: "Allow"
+    rules:
+      - name: "allow-github"
+        protocols:
+          - port: 443
+            type: "Https"
+        source_addresses: ["*"]
+        destination_fqdns:
+          - "github.com"
+          - "*.githubusercontent.com"
+          - "api.github.com"
+        description: "Allow access to GitHub services"
+      
+      - name: "allow-docker-hub"
+        protocols:
+          - port: 443
+            type: "Https"
+        source_addresses: ["*"]
+        destination_fqdns:
+          - "registry-1.docker.io"
+          - "auth.docker.io"
+          - "*.docker.io"
+        description: "Allow access to Docker Hub"
+
+  - name: "allow-security-updates"
+    priority: 300
+    action: "Allow"
+    rules:
+      - name: "allow-windows-updates"
+        protocols:
+          - port: 443
+            type: "Https"
+        source_addresses: ["*"]
+        destination_fqdns:
+          - "*.update.microsoft.com"
+          - "*.windowsupdate.com"
+          - "*.microsoftupdate.com"
+        description: "Allow Windows Update services"
+      
+      - name: "allow-antivirus-updates"
+        protocols:
+          - port: 443
+            type: "Https"
+        source_addresses: ["*"]
+        destination_fqdns:
+          - "*.defender.microsoft.com"
+          - "*.securitycenter.microsoft.com"
+        description: "Allow Microsoft Defender updates"
+
+# NAT Rule Collections (for inbound traffic)
+nat_rule_collections:
+  - name: "inbound-nat-rules"
+    priority: 100
+    action: "Dnat"
+    rules:
+      - name: "rdp-to-jumpbox"
+        protocols:
+          - type: "Tcp"
+        source_addresses: ["*"]
+        destination_addresses: ["${firewall_public_ip}"]
+        destination_ports: ["3389"]
+        translated_address: "10.0.3.10"
+        translated_port: "3389"
+        description: "RDP access to jumpbox server"
+      
+      - name: "ssh-to-jumpbox"
+        protocols:
+          - type: "Tcp"
+        source_addresses: ["*"]
+        destination_addresses: ["${firewall_public_ip}"]
+        destination_ports: ["22"]
+        translated_address: "10.0.3.10"
+        translated_port: "22"
+        description: "SSH access to jumpbox server"
+
+# Tags for resources
+tags:
+  Environment: "${environment}"
+  Project: "Virtual WAN Core"
+  Component: "Firewall"
+  ManagedBy: "Terraform"
+  CostCenter: "IT-Infrastructure" 

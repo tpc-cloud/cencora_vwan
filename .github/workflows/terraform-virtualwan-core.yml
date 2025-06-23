@@ -156,6 +156,42 @@ jobs:
         else
           echo "Virtual WAN does not exist, will be created by Terraform"
         fi
+        
+        # Check if Virtual Network exists and import it if needed
+        echo "Checking if Virtual Network vnet-fw-${{ github.event.inputs.environment }} exists..."
+        if az network vnet show --name "vnet-fw-${{ github.event.inputs.environment }}" --resource-group "rg-vwan-${{ github.event.inputs.environment }}" >/dev/null 2>&1; then
+          echo "Virtual Network exists, importing into Terraform state..."
+          terraform import azurerm_virtual_network.firewall "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-${{ github.event.inputs.environment }}/providers/Microsoft.Network/virtualNetworks/vnet-fw-${{ github.event.inputs.environment }}" || echo "Import failed or resource already in state"
+        else
+          echo "Virtual Network does not exist, will be created by Terraform"
+        fi
+        
+        # Check if Firewall Policy exists and import it if needed
+        echo "Checking if Firewall Policy fw-policy-${{ github.event.inputs.environment }} exists..."
+        if az network firewall policy show --name "fw-policy-${{ github.event.inputs.environment }}" --resource-group "rg-vwan-${{ github.event.inputs.environment }}" >/dev/null 2>&1; then
+          echo "Firewall Policy exists, importing into Terraform state..."
+          terraform import azurerm_firewall_policy.vwan "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-${{ github.event.inputs.environment }}/providers/Microsoft.Network/firewallPolicies/fw-policy-${{ github.event.inputs.environment }}" || echo "Import failed or resource already in state"
+        else
+          echo "Firewall Policy does not exist, will be created by Terraform"
+        fi
+        
+        # Check if Public IP exists and import it if needed
+        echo "Checking if Public IP pip-fw-${{ github.event.inputs.environment }} exists..."
+        if az network public-ip show --name "pip-fw-${{ github.event.inputs.environment }}" --resource-group "rg-vwan-${{ github.event.inputs.environment }}" >/dev/null 2>&1; then
+          echo "Public IP exists, importing into Terraform state..."
+          terraform import azurerm_public_ip.firewall "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-${{ github.event.inputs.environment }}/providers/Microsoft.Network/publicIPAddresses/pip-fw-${{ github.event.inputs.environment }}" || echo "Import failed or resource already in state"
+        else
+          echo "Public IP does not exist, will be created by Terraform"
+        fi
+        
+        # Check if Azure Firewall exists and import it if needed
+        echo "Checking if Azure Firewall fw-${{ github.event.inputs.environment }} exists..."
+        if az network firewall show --name "fw-${{ github.event.inputs.environment }}" --resource-group "rg-vwan-${{ github.event.inputs.environment }}" >/dev/null 2>&1; then
+          echo "Azure Firewall exists, importing into Terraform state..."
+          terraform import azurerm_firewall.vwan "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-${{ github.event.inputs.environment }}/providers/Microsoft.Network/azureFirewalls/fw-${{ github.event.inputs.environment }}" || echo "Import failed or resource already in state"
+        else
+          echo "Azure Firewall does not exist, will be created by Terraform"
+        fi
           
         echo "Creating Virtual WAN core infrastructure..."
         
