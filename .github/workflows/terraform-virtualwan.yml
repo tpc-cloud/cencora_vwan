@@ -1,6 +1,13 @@
 name: 'Terraform Virtual WAN Hubs'
 
 on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'terraform/**'
+      - '.github/workflows/terraform-virtualwan.yml'
+      - 'config/**'
   push:
     branches:
       - main
@@ -12,6 +19,7 @@ on:
 permissions:
   id-token: write
   contents: read
+  pull-requests: write
 
 env:
   ARM_CLIENT_ID: "${{ secrets.AZURE_CLIENT_ID }}"
@@ -19,9 +27,184 @@ env:
   ARM_TENANT_ID: "${{ secrets.AZURE_TENANT_ID }}"
 
 jobs:
-  terraform-hubs:
-    name: 'Terraform Virtual WAN Hubs'
+  terraform-plan:
+    name: 'Terraform Plan'
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    environment: production
+
+    env:
+      TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_environment: "prod"
+
+    defaults:
+      run:
+        working-directory: ./terraform
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Azure Login
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: "1.12.2"
+
+    - name: Setup Backend Storage
+      id: storage
+      run: |
+        # Set variables
+        RESOURCE_GROUP="rg-tf-state"
+        STORAGE_ACCOUNT="sttfstatecencoraprod"
+        CONTAINER_NAME="tfstate"
+        LOCATION="eastus"
+
+        # Create resource group if it doesn't exist
+        echo "Creating resource group $RESOURCE_GROUP..."
+        az group create --name $RESOURCE_GROUP --location $LOCATION
+
+        # Check if storage account already exists
+        if az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
+          echo "Storage account $STORAGE_ACCOUNT already exists, skipping creation"
+        else
+          # Create storage account if it doesn't exist
+          echo "Creating storage account $STORAGE_ACCOUNT..."
+          az storage account create \
+              --name $STORAGE_ACCOUNT \
+              --resource-group $RESOURCE_GROUP \
+              --location $LOCATION \
+              --sku Standard_LRS \
+              --encryption-services blob
+        fi
+
+        # Create blob container if it doesn't exist
+        echo "Creating blob container $CONTAINER_NAME..."
+        az storage container create \
+            --name $CONTAINER_NAME \
+            --account-name $STORAGE_ACCOUNT
+
+        # Save storage account name for later steps
+        echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
+
+    - name: Get Changed Hub Files
+      id: changed_hubs
+      run: |
+        # Get list of changed hub config files
+        CHANGED_FILES=$(git diff --name-only origin/main...HEAD | grep "config/hubs/.*\.yaml" || echo "")
+        
+        if [ -z "$CHANGED_FILES" ]; then
+          # If no specific hub files changed, process all hubs
+          HUB_FILES=$(ls config/hubs/*.yaml)
+          echo "No specific hub files changed, processing all hubs"
+        else
+          # Process only changed hub files
+          HUB_FILES="$CHANGED_FILES"
+          echo "Processing only changed hub files: $HUB_FILES"
+        fi
+        
+        HUB_NAMES=""
+        for file in $HUB_FILES; do
+          HUB_NAME=$(basename "$file" .yaml)
+          HUB_NAMES="$HUB_NAMES $HUB_NAME"
+        done
+        echo "hub_names=$HUB_NAMES" >> $GITHUB_OUTPUT
+        echo "Processing hubs: $HUB_NAMES"
+
+    - name: Terraform Format
+      id: fmt
+      run: terraform fmt -check
+
+    - name: Run Terraform Plan
+      id: plan
+      run: |
+        PLAN_OUTPUT=""
+        # Process each hub
+        for hub in ${{ steps.changed_hubs.outputs.hub_names }}; do
+          echo "Planning hub: $hub"
+          
+          # Create a clean directory for this hub
+          mkdir -p hub-${hub}
+          cp variables.tf hub-${hub}/
+          cp main-hubs.tf hub-${hub}/main.tf
+          
+          # Create backend.tf file for this hub
+          echo "terraform {" > hub-${hub}/backend.tf
+          echo "  backend \"azurerm\" {" >> hub-${hub}/backend.tf
+          echo "    resource_group_name  = \"rg-tf-state\"" >> hub-${hub}/backend.tf
+          echo "    storage_account_name = \"STORAGE_ACCOUNT_PLACEHOLDER\"" >> hub-${hub}/backend.tf
+          echo "    container_name       = \"tfstate\"" >> hub-${hub}/backend.tf
+          echo "    key                  = \"HUB_NAME_PLACEHOLDER\"" >> hub-${hub}/backend.tf
+          echo "    use_oidc             = true" >> hub-${hub}/backend.tf
+          echo "  }" >> hub-${hub}/backend.tf
+          echo "}" >> hub-${hub}/backend.tf
+          
+          # Replace placeholders with actual values
+          sed -i "s/STORAGE_ACCOUNT_PLACEHOLDER/${{ steps.storage.outputs.storage_account }}/g" hub-${hub}/backend.tf
+          sed -i "s/HUB_NAME_PLACEHOLDER/prod\/${hub}.tfstate/g" hub-${hub}/backend.tf
+          
+          # Create terraform.tfvars for this hub
+          echo "client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"" > hub-${hub}/terraform.tfvars
+          echo "tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"" >> hub-${hub}/terraform.tfvars
+          echo "subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"" >> hub-${hub}/terraform.tfvars
+          echo "environment = \"prod\"" >> hub-${hub}/terraform.tfvars
+          echo "hub_name = \"${hub}\"" >> hub-${hub}/terraform.tfvars
+          
+          # Run terraform in the hub directory
+          cd hub-${hub}
+          terraform init -reconfigure
+          
+          # Run terraform plan and capture output
+          echo "## Hub: $hub" >> ../plan_output.txt
+          terraform plan -var-file="terraform.tfvars" -input=false -detailed-exitcode >> ../plan_output.txt 2>&1 || echo "Plan completed with exit code $?" >> ../plan_output.txt
+          echo "" >> ../plan_output.txt
+          echo "---" >> ../plan_output.txt
+          echo "" >> ../plan_output.txt
+          cd ..
+        done
+        
+        # Save plan output for comment
+        PLAN_OUTPUT=$(cat plan_output.txt)
+        echo "plan_output<<EOF" >> $GITHUB_OUTPUT
+        echo "$PLAN_OUTPUT" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    - name: Comment Plan Output
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const output = `## Terraform Plan Results
+          
+          ${context.payload.pull_request ? `**PR:** #${context.payload.pull_request.number}` : ''}
+          **Branch:** ${context.payload.pull_request ? context.payload.pull_request.head.ref : context.ref}
+          **Commit:** ${context.sha}
+          
+          \`\`\`
+          ${process.env.PLAN_OUTPUT}
+          \`\`\`
+          `;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: output
+          });
+      env:
+        PLAN_OUTPUT: ${{ steps.plan.outputs.plan_output }}
+
+  terraform-apply:
+    name: 'Terraform Apply'
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment: production
 
     env:
