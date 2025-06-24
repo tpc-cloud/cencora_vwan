@@ -162,9 +162,9 @@ jobs:
           cd hub-${hub}
           terraform init -reconfigure
           
-          # Run terraform plan and capture output
+          # Run terraform plan and capture output (add -no-color)
           echo "## Hub: $hub" >> ../plan_output.txt
-          terraform plan -var-file="terraform.tfvars" -input=false -detailed-exitcode >> ../plan_output.txt 2>&1 || echo "Plan completed with exit code $?" >> ../plan_output.txt
+          terraform plan -no-color -var-file="terraform.tfvars" -input=false -detailed-exitcode >> ../plan_output.txt 2>&1 || echo "Plan completed with exit code $?" >> ../plan_output.txt
           echo "" >> ../plan_output.txt
           echo "---" >> ../plan_output.txt
           echo "" >> ../plan_output.txt
@@ -345,8 +345,14 @@ jobs:
           echo "Checking if Virtual Hub exists for ${hub}..."
           HUB_NAME=$(grep "name:" ../config/hubs/${hub}.yaml | head -1 | sed 's/.*name: *"\([^"]*\)".*/\1/' | sed 's/\${environment}/prod/g')
           if az network vhub show --name "$HUB_NAME" --resource-group "rg-vwan-prod" >/dev/null 2>&1; then
-            echo "Virtual Hub exists, importing into Terraform state..."
-            terraform import azurerm_virtual_hub.hub "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-prod/providers/Microsoft.Network/virtualHubs/$HUB_NAME" || echo "Import failed or resource already in state"
+            echo "Virtual Hub exists, checking if already in Terraform state..."
+            # Check if resource is already in state
+            if terraform state list | grep -q "azurerm_virtual_hub.hub"; then
+              echo "Virtual Hub already in Terraform state, skipping import"
+            else
+              echo "Virtual Hub exists but not in state, importing into Terraform state..."
+              terraform import azurerm_virtual_hub.hub "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-prod/providers/Microsoft.Network/virtualHubs/$HUB_NAME" || echo "Import failed or resource already in state"
+            fi
           else
             echo "Virtual Hub does not exist, will be created by Terraform"
           fi
