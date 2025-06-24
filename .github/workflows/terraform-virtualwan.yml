@@ -102,9 +102,9 @@ jobs:
         CHANGED_FILES=$(git diff --name-only origin/main...HEAD | grep "config/hubs/.*\.yaml" || echo "")
         
         if [ -z "$CHANGED_FILES" ]; then
-          # If no specific hub files changed, process all hubs
-          HUB_FILES=$(ls config/hubs/*.yaml)
-          echo "No specific hub files changed, processing all hubs"
+          # If no specific hub files changed, don't process any hubs
+          HUB_FILES=""
+          echo "No hub files changed, skipping plan"
         else
           # Process only changed hub files
           HUB_FILES="$CHANGED_FILES"
@@ -127,49 +127,56 @@ jobs:
       id: plan
       run: |
         PLAN_OUTPUT=""
-        # Process each hub
-        for hub in ${{ steps.changed_hubs.outputs.hub_names }}; do
-          echo "Planning hub: $hub"
-          
-          # Create a clean directory for this hub
-          mkdir -p hub-${hub}
-          cp variables.tf hub-${hub}/
-          cp main-hubs.tf hub-${hub}/main.tf
-          
-          # Create backend.tf file for this hub
-          echo "terraform {" > hub-${hub}/backend.tf
-          echo "  backend \"azurerm\" {" >> hub-${hub}/backend.tf
-          echo "    resource_group_name  = \"rg-tf-state\"" >> hub-${hub}/backend.tf
-          echo "    storage_account_name = \"STORAGE_ACCOUNT_PLACEHOLDER\"" >> hub-${hub}/backend.tf
-          echo "    container_name       = \"tfstate\"" >> hub-${hub}/backend.tf
-          echo "    key                  = \"HUB_NAME_PLACEHOLDER\"" >> hub-${hub}/backend.tf
-          echo "    use_oidc             = true" >> hub-${hub}/backend.tf
-          echo "  }" >> hub-${hub}/backend.tf
-          echo "}" >> hub-${hub}/backend.tf
-          
-          # Replace placeholders with actual values
-          sed -i "s/STORAGE_ACCOUNT_PLACEHOLDER/${{ steps.storage.outputs.storage_account }}/g" hub-${hub}/backend.tf
-          sed -i "s/HUB_NAME_PLACEHOLDER/prod\/${hub}.tfstate/g" hub-${hub}/backend.tf
-          
-          # Create terraform.tfvars for this hub
-          echo "client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"" > hub-${hub}/terraform.tfvars
-          echo "tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"" >> hub-${hub}/terraform.tfvars
-          echo "subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"" >> hub-${hub}/terraform.tfvars
-          echo "environment = \"prod\"" >> hub-${hub}/terraform.tfvars
-          echo "hub_name = \"${hub}\"" >> hub-${hub}/terraform.tfvars
-          
-          # Run terraform in the hub directory
-          cd hub-${hub}
-          terraform init -reconfigure
-          
-          # Run terraform plan and capture output (add -no-color)
-          echo "## Hub: $hub" >> ../plan_output.txt
-          terraform plan -no-color -var-file="terraform.tfvars" -input=false -detailed-exitcode >> ../plan_output.txt 2>&1 || echo "Plan completed with exit code $?" >> ../plan_output.txt
-          echo "" >> ../plan_output.txt
-          echo "---" >> ../plan_output.txt
-          echo "" >> ../plan_output.txt
-          cd ..
-        done
+        
+        # Check if there are any hubs to process
+        if [ -z "${{ steps.changed_hubs.outputs.hub_names }}" ]; then
+          echo "No hubs to process, skipping plan"
+          echo "No changes detected in hub configuration files." > plan_output.txt
+        else
+          # Process each hub
+          for hub in ${{ steps.changed_hubs.outputs.hub_names }}; do
+            echo "Planning hub: $hub"
+            
+            # Create a clean directory for this hub
+            mkdir -p hub-${hub}
+            cp variables.tf hub-${hub}/
+            cp main-hubs.tf hub-${hub}/main.tf
+            
+            # Create backend.tf file for this hub
+            echo "terraform {" > hub-${hub}/backend.tf
+            echo "  backend \"azurerm\" {" >> hub-${hub}/backend.tf
+            echo "    resource_group_name  = \"rg-tf-state\"" >> hub-${hub}/backend.tf
+            echo "    storage_account_name = \"STORAGE_ACCOUNT_PLACEHOLDER\"" >> hub-${hub}/backend.tf
+            echo "    container_name       = \"tfstate\"" >> hub-${hub}/backend.tf
+            echo "    key                  = \"HUB_NAME_PLACEHOLDER\"" >> hub-${hub}/backend.tf
+            echo "    use_oidc             = true" >> hub-${hub}/backend.tf
+            echo "  }" >> hub-${hub}/backend.tf
+            echo "}" >> hub-${hub}/backend.tf
+            
+            # Replace placeholders with actual values
+            sed -i "s/STORAGE_ACCOUNT_PLACEHOLDER/${{ steps.storage.outputs.storage_account }}/g" hub-${hub}/backend.tf
+            sed -i "s/HUB_NAME_PLACEHOLDER/prod\/${hub}.tfstate/g" hub-${hub}/backend.tf
+            
+            # Create terraform.tfvars for this hub
+            echo "client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"" > hub-${hub}/terraform.tfvars
+            echo "tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"" >> hub-${hub}/terraform.tfvars
+            echo "subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"" >> hub-${hub}/terraform.tfvars
+            echo "environment = \"prod\"" >> hub-${hub}/terraform.tfvars
+            echo "hub_name = \"${hub}\"" >> hub-${hub}/terraform.tfvars
+            
+            # Run terraform in the hub directory
+            cd hub-${hub}
+            terraform init -reconfigure
+            
+            # Run terraform plan and capture output (add -no-color)
+            echo "## Hub: $hub" >> ../plan_output.txt
+            terraform plan -no-color -var-file="terraform.tfvars" -input=false -detailed-exitcode >> ../plan_output.txt 2>&1 || echo "Plan completed with exit code $?" >> ../plan_output.txt
+            echo "" >> ../plan_output.txt
+            echo "---" >> ../plan_output.txt
+            echo "" >> ../plan_output.txt
+            cd ..
+          done
+        fi
         
         # Save plan output for comment
         PLAN_OUTPUT=$(cat plan_output.txt)
