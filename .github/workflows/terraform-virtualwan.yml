@@ -98,8 +98,18 @@ jobs:
     - name: Get Changed Hub Files
       id: changed_hubs
       run: |
-        # Get list of changed hub config files
-        CHANGED_FILES=$(git diff --name-only origin/main...HEAD | grep "config/hubs/.*\.yaml" || echo "")
+        # Get list of changed hub config files - use different methods for PR vs push
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          # For PRs, compare with the base branch
+          CHANGED_FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }} | grep "config/hubs/.*\.yaml" || echo "")
+          echo "PR detected, comparing ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
+        else
+          # For pushes, compare with previous commit
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep "config/hubs/.*\.yaml" || echo "")
+          echo "Push detected, comparing HEAD~1...HEAD"
+        fi
+        
+        echo "Changed files detected: $CHANGED_FILES"
         
         if [ -z "$CHANGED_FILES" ]; then
           # If no specific hub files changed, don't process any hubs
@@ -279,8 +289,18 @@ jobs:
     - name: Get Changed Hub Files
       id: changed_hubs
       run: |
-        # Get list of changed hub config files
-        CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep "config/hubs/.*\.yaml" || echo "")
+        # Get list of changed hub config files - use different methods for PR vs push
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          # For PRs, compare with the base branch
+          CHANGED_FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }} | grep "config/hubs/.*\.yaml" || echo "")
+          echo "PR detected, comparing ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
+        else
+          # For pushes, compare with previous commit
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep "config/hubs/.*\.yaml" || echo "")
+          echo "Push detected, comparing HEAD~1...HEAD"
+        fi
+        
+        echo "Changed files detected: $CHANGED_FILES"
         
         if [ -z "$CHANGED_FILES" ]; then
           # If no specific hub files changed, process all hubs
