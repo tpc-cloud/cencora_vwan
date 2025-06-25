@@ -5,16 +5,12 @@ on:
     branches:
       - main
     paths:
-      - 'terraform/**'
-      - '.github/workflows/terraform-virtualwan.yml'
-      - 'config/**'
+      - 'config/hubs/*.yaml'
   push:
     branches:
       - main
     paths:
-      - 'terraform/**'
-      - '.github/workflows/terraform-virtualwan.yml'
-      - 'config/**'
+      - 'config/hubs/*.yaml'
 
 permissions:
   id-token: write
