@@ -375,9 +375,9 @@ jobs:
           echo "environment = \"prod\"" >> hub-${hub}/terraform.tfvars
           echo "hub_name = \"${hub}\"" >> hub-${hub}/terraform.tfvars
           
-          # Break any existing blob leases
-          echo "Breaking any existing blob leases..."
-          az storage blob lease break --container-name tfstate --blob-name "prod/${hub}.tfstate" --account-name ${{ steps.storage.outputs.storage_account }} 2>/dev/null || echo "No existing lease to break or blob doesn't exist"
+          # Break any existing blob leases for debugging and testing purposes
+          # echo "Breaking any existing blob leases..."
+          # az storage blob lease break --container-name tfstate --blob-name "prod/${hub}.tfstate" --account-name ${{ steps.storage.outputs.storage_account }} 2>/dev/null || echo "No existing lease to break or blob doesn't exist"
           
           echo "Debug: Files in hub-${hub} directory:"
           ls -la hub-${hub}/
