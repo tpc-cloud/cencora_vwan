@@ -37,7 +37,7 @@ show_usage() {
     echo "  exists  - Check if resource group exists"
     echo ""
     echo "Environments:"
-    echo "  prod, dev, staging"
+    echo "  prod, dev, staging, tf-state"
     echo ""
     echo "Location (optional, default: eastus):"
     echo "  eastus, westus, centralus, etc."
@@ -48,6 +48,7 @@ show_usage() {
     echo "  $0 show prod"
     echo "  $0 list"
     echo "  $0 exists staging"
+    echo "  $0 create tf-state eastus"
 }
 
 # Validate inputs
@@ -84,11 +85,11 @@ esac
 # Validate environment (if provided)
 if [ -n "$ENVIRONMENT" ]; then
     case $ENVIRONMENT in
-        prod|dev|staging)
+        prod|dev|staging|tf-state)
             # Valid environment
             ;;
         *)
-            print_status $RED "Error: Invalid environment '$ENVIRONMENT'. Must be one of: prod, dev, staging"
+            print_status $RED "Error: Invalid environment '$ENVIRONMENT'. Must be one of: prod, dev, staging, tf-state"
             show_usage
             exit 1
             ;;
@@ -97,7 +98,11 @@ fi
 
 # Set resource group name
 if [ -n "$ENVIRONMENT" ]; then
-    RESOURCE_GROUP="rg-vwan-${ENVIRONMENT}"
+    if [ "$ENVIRONMENT" = "tf-state" ]; then
+        RESOURCE_GROUP="rg-tf-state"
+    else
+        RESOURCE_GROUP="rg-vwan-${ENVIRONMENT}"
+    fi
 fi
 
 # Function to check if Azure CLI is available
@@ -202,21 +207,23 @@ check_resource_group_exists() {
 
 # Function to list all VWAN resource groups
 list_resource_groups() {
-    print_status $BLUE "Listing all VWAN resource groups:"
+    print_status $BLUE "Listing all VWAN and Terraform state resource groups:"
     echo ""
     
-    # Get all resource groups that match the VWAN pattern
-    VWAN_RGS=$(az group list --query "[?contains(name, 'rg-vwan-')].{Name:name, Location:location, ProvisioningState:properties.provisioningState}" -o table)
+    # Get all resource groups that match the VWAN pattern or tf-state
+    VWAN_RGS=$(az group list --query "[?contains(name, 'rg-vwan-') || contains(name, 'rg-tf-state')].{Name:name, Location:location, ProvisioningState:properties.provisioningState}" -o table)
     
     if [ -n "$VWAN_RGS" ]; then
         echo "$VWAN_RGS"
     else
-        print_status $YELLOW "No VWAN resource groups found"
+        print_status $YELLOW "No VWAN or Terraform state resource groups found"
     fi
     
     echo ""
-    print_status $BLUE "Resource group naming pattern: rg-vwan-{environment}"
-    print_status $BLUE "Expected groups: rg-vwan-prod, rg-vwan-dev, rg-vwan-staging"
+    print_status $BLUE "Resource group naming patterns:"
+    print_status $BLUE "  - VWAN environments: rg-vwan-{environment}"
+    print_status $BLUE "  - Terraform state: rg-tf-state"
+    print_status $BLUE "Expected groups: rg-vwan-prod, rg-vwan-dev, rg-vwan-staging, rg-tf-state"
 }
 
 # Main execution

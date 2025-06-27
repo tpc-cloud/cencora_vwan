@@ -133,23 +133,14 @@ jobs:
           CONTAINER_NAME="tfstate"
           LOCATION="eastus"
 
-          # Check if resource group exists, create if not
-          if ! az group show --name $RESOURCE_GROUP &> /dev/null; then
-            echo "Creating resource group $RESOURCE_GROUP..."
-            az group create --name $RESOURCE_GROUP --location $LOCATION
-          else
-            echo "Resource group $RESOURCE_GROUP already exists"
-          fi
-          
+          # Check if storage account exists, create if not
           if ! az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
-            az storage account create \
-                --name $STORAGE_ACCOUNT \
-                --resource-group $RESOURCE_GROUP \
-                --location $LOCATION \
-                --sku Standard_LRS \
-                --encryption-services blob
+            echo "Storage account $STORAGE_ACCOUNT does not exist. Please ensure the resource group exists first."
+            echo "You can create it using: ./scripts/manage-resource-groups.sh create tf-state"
+            exit 1
           fi
 
+          # Create blob container if it doesn't exist
           az storage container create \
               --name $CONTAINER_NAME \
               --account-name $STORAGE_ACCOUNT
@@ -344,23 +335,14 @@ jobs:
           CONTAINER_NAME="tfstate"
           LOCATION="eastus"
 
-          # Check if resource group exists, create if not
-          if ! az group show --name $RESOURCE_GROUP &> /dev/null; then
-            echo "Creating resource group $RESOURCE_GROUP..."
-            az group create --name $RESOURCE_GROUP --location $LOCATION
-          else
-            echo "Resource group $RESOURCE_GROUP already exists"
-          fi
-          
+          # Check if storage account exists, create if not
           if ! az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
-            az storage account create \
-                --name $STORAGE_ACCOUNT \
-                --resource-group $RESOURCE_GROUP \
-                --location $LOCATION \
-                --sku Standard_LRS \
-                --encryption-services blob
+            echo "Storage account $STORAGE_ACCOUNT does not exist. Please ensure the resource group exists first."
+            echo "You can create it using: ./scripts/manage-resource-groups.sh create tf-state"
+            exit 1
           fi
 
+          # Create blob container if it doesn't exist
           az storage container create \
               --name $CONTAINER_NAME \
               --account-name $STORAGE_ACCOUNT

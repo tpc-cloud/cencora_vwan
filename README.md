@@ -59,6 +59,9 @@ cd Cencora_vwans
 Before deploying infrastructure, create the required resource groups for each environment:
 
 ```bash
+# Create Terraform state resource group (required for all workflows)
+./scripts/manage-resource-groups.sh create tf-state eastus
+
 # Create resource groups for all environments
 ./scripts/manage-resource-groups.sh create prod eastus
 ./scripts/manage-resource-groups.sh create dev eastus
@@ -101,36 +104,41 @@ The infrastructure uses separate resource groups for each environment. Resource 
 - **Production**: `rg-vwan-prod`
 - **Development**: `rg-vwan-dev`
 - **Staging**: `rg-vwan-staging`
+- **Terraform State**: `rg-tf-state`
 
 ### Managing Resource Groups
 
 Use the `scripts/manage-resource-groups.sh` script to manage resource groups:
 
 ```bash
-# Create a resource group
-./scripts/manage-resource-groups.sh create <environment> [location]
-
-# Examples:
+# Create resource groups for environments
 ./scripts/manage-resource-groups.sh create prod eastus
 ./scripts/manage-resource-groups.sh create dev
-./scripts/manage-resource-groups.sh create staging westus
+./scripts/manage-resource-groups.sh create staging
 
-# Check if a resource group exists
+# Create Terraform state resource group
+./scripts/manage-resource-groups.sh create tf-state eastus
+
+# Check if resource groups exist
 ./scripts/manage-resource-groups.sh exists prod
+./scripts/manage-resource-groups.sh exists tf-state
 
 # Show resource group details
 ./scripts/manage-resource-groups.sh show prod
+./scripts/manage-resource-groups.sh show tf-state
 
-# List all VWAN resource groups
+# List all resource groups
 ./scripts/manage-resource-groups.sh list
 
-# Delete a resource group (WARNING: This deletes ALL resources!)
+# Delete resource groups (WARNING: This deletes ALL resources!)
 ./scripts/manage-resource-groups.sh delete prod
+./scripts/manage-resource-groups.sh delete tf-state
 ```
 
 ### Resource Group Requirements
 
-- Resource groups must exist before running Terraform
+- **Environment Resource Groups** (`rg-vwan-{env}`): Must exist before running Terraform for VWAN infrastructure
+- **Terraform State Resource Group** (`rg-tf-state`): Must exist before running any Terraform workflows
 - Each environment has its own resource group
 - Resource groups are created in the specified Azure region
 - The script checks for existing resource groups before creating new ones
