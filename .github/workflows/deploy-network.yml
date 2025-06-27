@@ -296,6 +296,57 @@ jobs:
           PLAN_OUTPUT: ${{ steps.plan.outputs.plan_output }}
           PLANNED_ENVIRONMENTS: ${{ steps.plan.outputs.planned_environments }}
 
+      # TODO: Uncomment when ServiceNow integration is available
+      # - name: Update ServiceNow with VWAN Core Plan Results
+      #   uses: actions/github-script@v7
+      #   with:
+      #     script: |
+      #       // ServiceNow API integration for plan results
+      #       const servicenowUrl = process.env.SERVICENOW_URL;
+      #       const servicenowUsername = process.env.SERVICENOW_USERNAME;
+      #       const servicenowPassword = process.env.SERVICENOW_PASSWORD;
+      #       
+      #       if (!servicenowUrl || !servicenowUsername || !servicenowPassword) {
+      #         console.log('ServiceNow credentials not configured, skipping update');
+      #         return;
+      #       }
+      #       
+      #       const planData = {
+      #         component: 'VWAN Core Infrastructure',
+      #         pr_number: context.payload.pull_request.number,
+      #         branch: context.payload.pull_request.head.ref,
+      #         commit: context.sha,
+      #         environments: process.env.PLANNED_ENVIRONMENTS,
+      #         plan_output: process.env.PLAN_OUTPUT,
+      #         status: 'plan_completed',
+      #         timestamp: new Date().toISOString()
+      #       };
+      #       
+      #       try {
+      #         const response = await fetch(`${servicenowUrl}/api/now/table/change_request`, {
+      #           method: 'POST',
+      #           headers: {
+      #             'Content-Type': 'application/json',
+      #             'Authorization': 'Basic ' + Buffer.from(`${servicenowUsername}:${servicenowPassword}`).toString('base64')
+      #           },
+      #           body: JSON.stringify(planData)
+      #         });
+      #         
+      #         if (response.ok) {
+      #           console.log('ServiceNow update successful');
+      #         } else {
+      #           console.log('ServiceNow update failed:', response.statusText);
+      #         }
+      #       } catch (error) {
+      #         console.log('ServiceNow update error:', error.message);
+      #       }
+      #   env:
+      #     PLAN_OUTPUT: ${{ steps.plan.outputs.plan_output }}
+      #     PLANNED_ENVIRONMENTS: ${{ steps.plan.outputs.planned_environments }}
+      #     SERVICENOW_URL: ${{ secrets.SERVICENOW_URL }}
+      #     SERVICENOW_USERNAME: ${{ secrets.SERVICENOW_USERNAME }}
+      #     SERVICENOW_PASSWORD: ${{ secrets.SERVICENOW_PASSWORD }}
+
   plan-hubs:
     name: 'Plan Hub Changes'
     needs: analyze-changes
@@ -516,6 +567,59 @@ jobs:
           PLAN_OUTPUT: ${{ steps.plan.outputs.plan_output }}
           PLANNED_ENVIRONMENTS: ${{ steps.plan.outputs.planned_environments }}
           PLANNED_HUBS: ${{ steps.plan.outputs.planned_hubs }}
+
+      # TODO: Uncomment when ServiceNow integration is available
+      # - name: Update ServiceNow with Hub Plan Results
+      #   uses: actions/github-script@v7
+      #   with:
+      #     script: |
+      #       // ServiceNow API integration for plan results
+      #       const servicenowUrl = process.env.SERVICENOW_URL;
+      #       const servicenowUsername = process.env.SERVICENOW_USERNAME;
+      #       const servicenowPassword = process.env.SERVICENOW_PASSWORD;
+      #       
+      #       if (!servicenowUrl || !servicenowUsername || !servicenowPassword) {
+      #         console.log('ServiceNow credentials not configured, skipping update');
+      #         return;
+      #       }
+      #       
+      #       const planData = {
+      #         component: 'Virtual WAN Hubs',
+      #         pr_number: context.payload.pull_request.number,
+      #         branch: context.payload.pull_request.head.ref,
+      #         commit: context.sha,
+      #         environments: process.env.PLANNED_ENVIRONMENTS,
+      #         hubs: process.env.PLANNED_HUBS,
+      #         plan_output: process.env.PLAN_OUTPUT,
+      #         status: 'plan_completed',
+      #         timestamp: new Date().toISOString()
+      #       };
+      #       
+      #       try {
+      #         const response = await fetch(`${servicenowUrl}/api/now/table/change_request`, {
+      #           method: 'POST',
+      #           headers: {
+      #             'Content-Type': 'application/json',
+      #             'Authorization': 'Basic ' + Buffer.from(`${servicenowUsername}:${servicenowPassword}`).toString('base64')
+      #           },
+      #           body: JSON.stringify(planData)
+      #         });
+      #         
+      #         if (response.ok) {
+      #           console.log('ServiceNow update successful');
+      #         } else {
+      #           console.log('ServiceNow update failed:', response.statusText);
+      #         }
+      #       } catch (error) {
+      #         console.log('ServiceNow update error:', error.message);
+      #       }
+      #   env:
+      #     PLAN_OUTPUT: ${{ steps.plan.outputs.plan_output }}
+      #     PLANNED_ENVIRONMENTS: ${{ steps.plan.outputs.planned_environments }}
+      #     PLANNED_HUBS: ${{ steps.plan.outputs.planned_hubs }}
+      #     SERVICENOW_URL: ${{ secrets.SERVICENOW_URL }}
+      #     SERVICENOW_USERNAME: ${{ secrets.SERVICENOW_USERNAME }}
+      #     SERVICENOW_PASSWORD: ${{ secrets.SERVICENOW_PASSWORD }}
 
   deploy-vwan-core:
     name: 'Deploy VWAN Core Changes'
