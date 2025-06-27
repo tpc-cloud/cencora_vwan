@@ -1,0 +1,37 @@
+name: Process Infra YAML
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_yaml:
+        description: "Minimal YAML input with environments, hubs, vnets"
+        required: true
+        type: string
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Generate Config Files
+        run: |
+          echo "${{ github.event.inputs.config_yaml }}" > temp_infra.yaml
+          python scripts/generate-infra-configs.py temp_infra.yaml
+
+      - name: Commit changes
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add terraform/config/
+          git commit -m "Add infra config via workflow"
+          git push
