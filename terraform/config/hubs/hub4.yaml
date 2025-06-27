@@ -1,7 +1,0 @@
-name: "hub4-${environment}"
-address_prefix: "10.3.0.0/24"
-sku: "Standard"
-hub_routing_preference: "ASPath"
-vpn_gateway:
-  name: "vpngw4-${environment}"
-  scale_unit: 1 

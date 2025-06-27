@@ -150,13 +150,4 @@ resource "azurerm_firewall_policy_rule_collection" "application_rules" {
     destination_fqdns = ["*.azure.com", "*.microsoft.com"]
     action            = "Allow"
   }
-}
-
-# Use the firewall rules module to apply comprehensive rules from YAML config
-module "firewall_rules" {
-  source = "./modules/firewall-rules"
-
-  config_file_path   = "${path.module}/firewall-config/firewall-rules.yaml"
-  firewall_policy_id = azurerm_firewall_policy.vwan.id
-  tags               = var.tags
 } 

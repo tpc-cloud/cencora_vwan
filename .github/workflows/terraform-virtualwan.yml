@@ -5,12 +5,12 @@ on:
     branches:
       - main
     paths:
-      - 'config/hubs/*.yaml'
+      - 'terraform/config/**/config.yml'
   push:
     branches:
       - main
     paths:
-      - 'config/hubs/*.yaml'
+      - 'terraform/config/**/config.yml'
 
 permissions:
   id-token: write
@@ -23,17 +23,80 @@ env:
   ARM_TENANT_ID: "${{ secrets.AZURE_TENANT_ID }}"
 
 jobs:
+  inspect-config:
+    name: 'Inspect Configuration Changes'
+    runs-on: ubuntu-latest
+    outputs:
+      vwan_core_changed: ${{ steps.check-diff.outputs.vwan_core_changed }}
+      hubs_changed: ${{ steps.check-diff.outputs.hubs_changed }}
+      config_changed: ${{ steps.check-diff.outputs.config_changed }}
+      environments_changed: ${{ steps.check-diff.outputs.environments_changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2 # Needed to access previous commit for diff
+      
+      - name: Check config.yml changes
+        id: check-diff
+        run: |
+          # Get the diff of config.yml files between the current and previous commit
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # For PRs, compare with base branch
+            git fetch origin ${{ github.event.pull_request.base.ref }}
+            git diff origin/${{ github.event.pull_request.base.ref }}..HEAD -- terraform/config/ > config_diff.txt
+          else
+            # For pushes, compare with previous commit
+            git diff HEAD^ HEAD -- terraform/config/ > config_diff.txt
+          fi
+          
+          echo "Config diff:"
+          cat config_diff.txt || echo "No diff found or file doesn't exist"
+          
+          # Check for changes in specific sections across all environment configs
+          if grep -E '^\+[[:space:]]*vwan_core:' config_diff.txt || grep -E '^-.*vwan_core:' config_diff.txt; then
+            echo "vwan_core_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "vwan_core_changed=false" >> $GITHUB_OUTPUT
+          fi
+          
+          if grep -E '^\+[[:space:]]*hubs:' config_diff.txt || grep -E '^-.*hubs:' config_diff.txt; then
+            echo "hubs_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "hubs_changed=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Check if any config changes occurred
+          if [ -s config_diff.txt ]; then
+            echo "config_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "config_changed=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Get list of environments that have changes
+          CHANGED_ENVS=$(grep -E '^[+-][[:space:]]*terraform/config/' config_diff.txt | sed 's|^[+-][[:space:]]*terraform/config/\([^/]*\)/.*|\1|' | sort -u | tr '\n' ',' | sed 's/,$//')
+          if [ -n "$CHANGED_ENVS" ]; then
+            echo "environments_changed=$CHANGED_ENVS" >> $GITHUB_OUTPUT
+          else
+            echo "environments_changed=" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "Changes detected:"
+          echo "  VWAN Core: ${{ steps.check-diff.outputs.vwan_core_changed }}"
+          echo "  Hubs: ${{ steps.check-diff.outputs.hubs_changed }}"
+          echo "  Config: ${{ steps.check-diff.outputs.config_changed }}"
+          echo "  Environments: ${{ steps.check-diff.outputs.environments_changed }}"
+
   terraform-plan:
     name: 'Terraform Plan'
+    needs: inspect-config
+    if: needs.inspect-config.outputs.config_changed == 'true' && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
     environment: production
 
     env:
       TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
       TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
       TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      TF_VAR_environment: "prod"
 
     defaults:
       run:
@@ -91,116 +154,119 @@ jobs:
         # Save storage account name for later steps
         echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
 
-    - name: Get Changed Hub Files
-      id: changed_hubs
-      run: |
-        # Debug: Show current directory and available files
-        echo "Current directory: $(pwd)"
-        echo "Available config files:"
-        ls -la ../../config/hubs/ || echo "config/hubs directory not found"
-        
-        # Get list of changed hub config files - use different methods for PR vs push
-        if [ "${{ github.event_name }}" = "pull_request" ]; then
-          # For PRs, use a simpler approach - fetch the base branch and compare
-          echo "PR detected, fetching base branch and comparing changes"
-          
-          # Fetch the base branch
-          git fetch origin ${{ github.event.pull_request.base.ref }}
-          
-          # Show all changed files first
-          ALL_CHANGED=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}..HEAD)
-          echo "All changed files: $ALL_CHANGED"
-          
-          CHANGED_FILES=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}..HEAD | grep "config/hubs/.*\.yaml" || echo "")
-        else
-          # For pushes, compare with previous commit
-          echo "Push detected, comparing HEAD~1..HEAD"
-          
-          # Show all changed files first
-          ALL_CHANGED=$(git diff --name-only HEAD~1..HEAD)
-          echo "All changed files: $ALL_CHANGED"
-          
-          CHANGED_FILES=$(git diff --name-only HEAD~1..HEAD | grep "config/hubs/.*\.yaml" || echo "")
-        fi
-        
-        echo "Changed hub files detected: '$CHANGED_FILES'"
-        
-        if [ -z "$CHANGED_FILES" ]; then
-          # If no specific hub files changed, don't process any hubs
-          HUB_FILES=""
-          echo "No hub files changed, skipping plan"
-        else
-          # Process only changed hub files
-          HUB_FILES="$CHANGED_FILES"
-          echo "Processing only changed hub files: $HUB_FILES"
-        fi
-        
-        HUB_NAMES=""
-        for file in $HUB_FILES; do
-          HUB_NAME=$(basename "$file" .yaml)
-          HUB_NAMES="$HUB_NAMES $HUB_NAME"
-        done
-        echo "hub_names=$HUB_NAMES" >> $GITHUB_OUTPUT
-        echo "Processing hubs: $HUB_NAMES"
-
-    - name: Terraform Format
-      id: fmt
-      run: terraform fmt -check
-
     - name: Run Terraform Plan
       id: plan
       run: |
+        # Get changed environments
+        CHANGED_ENVS="${{ needs.inspect-config.outputs.environments_changed }}"
         PLAN_OUTPUT=""
         
-        # Check if there are any hubs to process
-        if [ -z "${{ steps.changed_hubs.outputs.hub_names }}" ]; then
-          echo "No hubs to process, skipping plan"
-          echo "No changes detected in hub configuration files." > plan_output.txt
-        else
-          # Process each hub
-          for hub in ${{ steps.changed_hubs.outputs.hub_names }}; do
-            echo "Planning hub: $hub"
+        for env in ${CHANGED_ENVS//,/ }; do
+          echo "Planning for environment: $env"
+          
+          # Check if config file exists for this environment
+          if [ ! -f "config/$env/config.yml" ]; then
+            echo "Config file not found for environment: $env, skipping"
+            continue
+          fi
+          
+          # Check if resource group exists
+          RESOURCE_GROUP="rg-vwan-${env}"
+          if ! az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+            echo "Resource group '$RESOURCE_GROUP' does not exist. Please create it using:"
+            echo "  ./scripts/manage-resource-groups.sh create $env"
+            continue
+          fi
+          
+          # Parse config to get enabled hubs
+          python3 -c |
+            import yaml
+            import sys
+            
+            try:
+                with open('config/$env/config.yml', 'r') as f:
+                    config = yaml.safe_load(f)
+                
+                hubs = config.get('hubs', {})
+                enabled_hubs = []
+                
+                for hub_name, hub_config in hubs.items():
+                    if hub_config.get('enabled', False):
+                        enabled_hubs.append(hub_name)
+                
+                print(' '.join(enabled_hubs))
+                
+            except Exception as e:
+                print(f'Error processing config for $env: {e}')
+                sys.exit(1)
+          > enabled_hubs_${env}.txt
+          
+          ENABLED_HUBS=$(cat enabled_hubs_${env}.txt)
+          
+          if [ -z "$ENABLED_HUBS" ]; then
+            echo "No enabled hubs found for environment: $env"
+            continue
+          fi
+          
+          # Process each enabled hub
+          for hub in $ENABLED_HUBS; do
+            echo "Planning hub: $hub for environment: $env"
             
             # Create a clean directory for this hub
-            mkdir -p hub-${hub}
-            cp variables.tf hub-${hub}/
-            cp main-hubs.tf hub-${hub}/main.tf
+            mkdir -p hub-${env}-${hub}
+            cp variables.tf hub-${env}-${hub}/
+            cp main-hubs.tf hub-${env}-${hub}/main.tf
             
             # Create backend.tf file for this hub
-            echo "terraform {" > hub-${hub}/backend.tf
-            echo "  backend \"azurerm\" {" >> hub-${hub}/backend.tf
-            echo "    resource_group_name  = \"rg-tf-state\"" >> hub-${hub}/backend.tf
-            echo "    storage_account_name = \"STORAGE_ACCOUNT_PLACEHOLDER\"" >> hub-${hub}/backend.tf
-            echo "    container_name       = \"tfstate\"" >> hub-${hub}/backend.tf
-            echo "    key                  = \"HUB_NAME_PLACEHOLDER\"" >> hub-${hub}/backend.tf
-            echo "    use_oidc             = true" >> hub-${hub}/backend.tf
-            echo "  }" >> hub-${hub}/backend.tf
-            echo "}" >> hub-${hub}/backend.tf
+            cat > hub-${env}-${hub}/backend.tf << EOF
+          terraform {
+            backend "azurerm" {
+              resource_group_name  = "rg-tf-state"
+              storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+              container_name       = "tfstate"
+              key                  = "${env}/${hub}.tfstate"
+              use_oidc             = true
+            }
+          }
+          EOF
             
-            # Replace placeholders with actual values
-            sed -i "s/STORAGE_ACCOUNT_PLACEHOLDER/${{ steps.storage.outputs.storage_account }}/g" hub-${hub}/backend.tf
-            sed -i "s/HUB_NAME_PLACEHOLDER/prod\/${hub}.tfstate/g" hub-${hub}/backend.tf
-            
-            # Create terraform.tfvars for this hub
-            echo "client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"" > hub-${hub}/terraform.tfvars
-            echo "tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"" >> hub-${hub}/terraform.tfvars
-            echo "subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"" >> hub-${hub}/terraform.tfvars
-            echo "environment = \"prod\"" >> hub-${hub}/terraform.tfvars
-            echo "hub_name = \"${hub}\"" >> hub-${hub}/terraform.tfvars
+            # Generate terraform.tfvars from config.yml
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  tfvars = f'''client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"
+              tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"
+              subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"
+              environment = \"{config.get('environment', '$env')}\"
+              hub_name = \"{hub}\"
+              location = \"{config.get('region', 'eastus')}\"
+              '''
+                  
+                  with open('hub-$env-$hub/terraform.tfvars', 'w') as f:
+                      f.write(tfvars)
+                      
+              except Exception as e:
+                  print(f'Error processing config for $env hub $hub: {e}')
+                  sys.exit(1)
             
             # Run terraform in the hub directory
-            cd hub-${hub}
+            cd hub-${env}-${hub}
             terraform init -reconfigure
             
-            # Run terraform plan and capture output (add -no-color)
-            echo "## Hub: $hub" >> ../plan_output.txt
+            # Run terraform plan and capture output
+            echo "## Environment: $env - Hub: $hub" >> ../plan_output.txt
             terraform plan -no-color -var-file="terraform.tfvars" -input=false -detailed-exitcode >> ../plan_output.txt 2>&1 || echo "Plan completed with exit code $?" >> ../plan_output.txt
             echo "" >> ../plan_output.txt
             echo "---" >> ../plan_output.txt
             echo "" >> ../plan_output.txt
             cd ..
           done
-        fi
+        done
         
         # Save plan output for comment
         PLAN_OUTPUT=$(cat plan_output.txt)
@@ -214,9 +280,10 @@ jobs:
         script: |
           const output = `## Terraform Plan Results
           
-          ${context.payload.pull_request ? `**PR:** #${context.payload.pull_request.number}` : ''}
-          **Branch:** ${context.payload.pull_request ? context.payload.pull_request.head.ref : context.ref}
+          **PR:** #${context.payload.pull_request.number}
+          **Branch:** ${context.payload.pull_request.head.ref}
           **Commit:** ${context.sha}
+          **Environments:** ${process.env.CHANGED_ENVIRONMENTS}
           
           \`\`\`
           ${process.env.PLAN_OUTPUT}
@@ -231,18 +298,19 @@ jobs:
           });
       env:
         PLAN_OUTPUT: ${{ steps.plan.outputs.plan_output }}
+        CHANGED_ENVIRONMENTS: ${{ needs.inspect-config.outputs.environments_changed }}
 
   terraform-apply:
     name: 'Terraform Apply'
+    needs: [inspect-config, terraform-plan]
+    if: needs.inspect-config.outputs.config_changed == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment: production
 
     env:
       TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
       TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
       TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      TF_VAR_environment: "prod"
 
     defaults:
       run:
@@ -300,104 +368,118 @@ jobs:
         # Save storage account name for later steps
         echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
 
-    - name: Get Changed Hub Files
-      id: changed_hubs
+    - name: Terraform Apply
       run: |
-        # Get list of changed hub config files - use different methods for PR vs push
-        if [ "${{ github.event_name }}" = "pull_request" ]; then
-          # For PRs, compare with the base branch
-          CHANGED_FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} | grep "config/hubs/.*\.yaml" || echo "")
-          echo "PR detected, comparing ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
-        else
-          # For pushes, compare with previous commit
-          CHANGED_FILES=$(git diff --name-only HEAD~1..HEAD | grep "config/hubs/.*\.yaml" || echo "")
-          echo "Push detected, comparing HEAD~1..HEAD"
-        fi
+        # Get changed environments
+        CHANGED_ENVS="${{ needs.inspect-config.outputs.environments_changed }}"
         
-        echo "Changed files detected: $CHANGED_FILES"
-        
-        if [ -z "$CHANGED_FILES" ]; then
-          # If no specific hub files changed, process all hubs
-          HUB_FILES=$(ls config/hubs/*.yaml)
-          echo "No specific hub files changed, processing all hubs"
-        else
-          # Process only changed hub files
-          HUB_FILES="$CHANGED_FILES"
-          echo "Processing only changed hub files: $HUB_FILES"
-        fi
-        
-        HUB_NAMES=""
-        for file in $HUB_FILES; do
-          HUB_NAME=$(basename "$file" .yaml)
-          HUB_NAMES="$HUB_NAMES $HUB_NAME"
-        done
-        echo "hub_names=$HUB_NAMES" >> $GITHUB_OUTPUT
-        echo "Processing hubs: $HUB_NAMES"
-
-    - name: Terraform Format
-      id: fmt
-      run: terraform fmt -check
-
-    - name: Terraform Apply Hub
-      run: |
-        # Process each hub
-        for hub in ${{ steps.changed_hubs.outputs.hub_names }}; do
-          echo "Processing hub: $hub"
+        for env in ${CHANGED_ENVS//,/ }; do
+          echo "Applying for environment: $env"
           
-          # Create a clean directory for this hub
-          mkdir -p hub-${hub}
-          cp variables.tf hub-${hub}/
-          cp main-hubs.tf hub-${hub}/main.tf
-          
-          # Create backend.tf file for this hub
-          echo "terraform {" > hub-${hub}/backend.tf
-          echo "  backend \"azurerm\" {" >> hub-${hub}/backend.tf
-          echo "    resource_group_name  = \"rg-tf-state\"" >> hub-${hub}/backend.tf
-          echo "    storage_account_name = \"STORAGE_ACCOUNT_PLACEHOLDER\"" >> hub-${hub}/backend.tf
-          echo "    container_name       = \"tfstate\"" >> hub-${hub}/backend.tf
-          echo "    key                  = \"HUB_NAME_PLACEHOLDER\"" >> hub-${hub}/backend.tf
-          echo "    use_oidc             = true" >> hub-${hub}/backend.tf
-          echo "  }" >> hub-${hub}/backend.tf
-          echo "}" >> hub-${hub}/backend.tf
-          
-          # Replace placeholders with actual values
-          sed -i "s/STORAGE_ACCOUNT_PLACEHOLDER/${{ steps.storage.outputs.storage_account }}/g" hub-${hub}/backend.tf
-          sed -i "s/HUB_NAME_PLACEHOLDER/prod\/${hub}.tfstate/g" hub-${hub}/backend.tf
-          
-          # Create terraform.tfvars for this hub
-          echo "client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"" > hub-${hub}/terraform.tfvars
-          echo "tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"" >> hub-${hub}/terraform.tfvars
-          echo "subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"" >> hub-${hub}/terraform.tfvars
-          echo "environment = \"prod\"" >> hub-${hub}/terraform.tfvars
-          echo "hub_name = \"${hub}\"" >> hub-${hub}/terraform.tfvars
-          
-          # Break any existing blob leases for debugging and testing purposes
-          # echo "Breaking any existing blob leases..."
-          # az storage blob lease break --container-name tfstate --blob-name "prod/${hub}.tfstate" --account-name ${{ steps.storage.outputs.storage_account }} 2>/dev/null || echo "No existing lease to break or blob doesn't exist"
-          
-          echo "Debug: Files in hub-${hub} directory:"
-          ls -la hub-${hub}/
-          
-          # Run terraform in the hub directory
-          cd hub-${hub}
-          terraform init -reconfigure
-          
-          # Check if Virtual Hub exists and import it if needed
-          echo "Checking if Virtual Hub exists for ${hub}..."
-          HUB_NAME=$(grep "name:" ../config/hubs/${hub}.yaml | head -1 | sed 's/.*name: *"\([^"]*\)".*/\1/' | sed 's/\${environment}/prod/g')
-          if az network vhub show --name "$HUB_NAME" --resource-group "rg-vwan-prod" >/dev/null 2>&1; then
-            echo "Virtual Hub exists, checking if already in Terraform state..."
-            # Check if resource is already in state
-            if terraform state list | grep -q "azurerm_virtual_hub.hub"; then
-              echo "Virtual Hub already in Terraform state, skipping import"
-            else
-              echo "Virtual Hub exists but not in state, importing into Terraform state..."
-              terraform import azurerm_virtual_hub.hub "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-prod/providers/Microsoft.Network/virtualHubs/$HUB_NAME" || echo "Import failed or resource already in state"
-            fi
-          else
-            echo "Virtual Hub does not exist, will be created by Terraform"
+          # Check if config file exists for this environment
+          if [ ! -f "config/$env/config.yml" ]; then
+            echo "Config file not found for environment: $env, skipping"
+            continue
           fi
           
-          terraform apply -auto-approve -var-file="terraform.tfvars" -input=false -lock=false
-          cd ..
+          # Parse config to get enabled hubs
+          python3 -c |
+            import yaml
+            import sys
+            
+            try:
+                with open('config/$env/config.yml', 'r') as f:
+                    config = yaml.safe_load(f)
+                
+                hubs = config.get('hubs', {})
+                enabled_hubs = []
+                
+                for hub_name, hub_config in hubs.items():
+                    if hub_config.get('enabled', False):
+                        enabled_hubs.append(hub_name)
+                
+                print(' '.join(enabled_hubs))
+                
+            except Exception as e:
+                print(f'Error processing config for $env: {e}')
+                sys.exit(1)
+          > enabled_hubs_${env}.txt
+          
+          ENABLED_HUBS=$(cat enabled_hubs_${env}.txt)
+          
+          if [ -z "$ENABLED_HUBS" ]; then
+            echo "No enabled hubs found for environment: $env"
+            continue
+          fi
+          
+          # Process each enabled hub
+          for hub in $ENABLED_HUBS; do
+            echo "Applying hub: $hub for environment: $env"
+            
+            # Create a clean directory for this hub
+            mkdir -p hub-${env}-${hub}
+            cp variables.tf hub-${env}-${hub}/
+            cp main-hubs.tf hub-${env}-${hub}/main.tf
+            
+            # Create backend.tf file for this hub
+            cat > hub-${env}-${hub}/backend.tf << EOF
+          terraform {
+            backend "azurerm" {
+              resource_group_name  = "rg-tf-state"
+              storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+              container_name       = "tfstate"
+              key                  = "${env}/${hub}.tfstate"
+              use_oidc             = true
+            }
+          }
+          EOF
+            
+            # Generate terraform.tfvars from config.yml
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  tfvars = f'''client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"
+              tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"
+              subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"
+              environment = \"{config.get('environment', '$env')}\"
+              hub_name = \"{hub}\"
+              location = \"{config.get('region', 'eastus')}\"
+              '''
+                  
+                  with open('hub-$env-$hub/terraform.tfvars', 'w') as f:
+                      f.write(tfvars)
+                      
+              except Exception as e:
+                  print(f'Error processing config for $env hub $hub: {e}')
+                  sys.exit(1)
+            
+            # Run terraform in the hub directory
+            cd hub-${env}-${hub}
+            terraform init -reconfigure
+            
+            # Check if Virtual Hub exists and import it if needed
+            echo "Checking if Virtual Hub exists for ${hub} in environment ${env}..."
+            HUB_NAME="${hub}-${env}"
+            RESOURCE_GROUP="rg-vwan-${env}"
+            if az network vhub show --name "$HUB_NAME" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
+              echo "Virtual Hub exists, checking if already in Terraform state..."
+              # Check if resource is already in state
+              if terraform state list | grep -q "azurerm_virtual_hub.hub"; then
+                echo "Virtual Hub already in Terraform state, skipping import"
+              else
+                echo "Virtual Hub exists but not in state, importing into Terraform state..."
+                terraform import azurerm_virtual_hub.hub "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Network/virtualHubs/$HUB_NAME" || echo "Import failed or resource already in state"
+              fi
+            else
+              echo "Virtual Hub does not exist, will be created by Terraform"
+            fi
+            
+            terraform apply -auto-approve -var-file="terraform.tfvars" -input=false -lock=false
+            cd ..
+          done
         done 

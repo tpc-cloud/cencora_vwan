@@ -1,0 +1,111 @@
+# Virtual WAN Infrastructure Configuration - Development Environment
+# This file controls what gets deployed and updated in the Virtual WAN environment
+
+environment: dev
+region: eastus
+
+# Virtual WAN Core Configuration
+vwan_core:
+  enabled: true
+  name: "vwan-dev"
+  resource_group: "rg-vwan-dev"
+  type: "Standard"
+  location: "eastus"
+  
+  # Firewall Configuration
+  firewall:
+    enabled: true
+    name: "fw-dev"
+    policy_name: "fw-policy-dev"
+    sku: "Standard"
+    public_ip_name: "pip-fw-dev"
+    vnet_name: "vnet-fw-dev"
+    vnet_address_space: "10.1.0.0/16"
+    firewall_subnet: "10.1.1.0/26"
+    management_subnet: "10.1.2.0/26"
+
+# Hub Configurations
+hubs:
+  hub1:
+    enabled: true
+    name: "hub1-dev"
+    address_prefix: "192.169.0.0/16"
+    sku: "Standard"
+    hub_routing_preference: "ASPath"
+    location: "eastus"
+    
+    # VPN Gateway Configuration
+    vpn_gateway:
+      enabled: true
+      name: "vpngw1-dev"
+      scale_unit: 1
+    
+    # ExpressRoute Gateway Configuration
+    express_route_gateway:
+      enabled: false
+      name: "ergw1-dev"
+      scale_unit: 1
+
+  hub2:
+    enabled: false
+    name: "hub2-dev"
+    address_prefix: "192.169.1.0/16"
+    sku: "Standard"
+    hub_routing_preference: "ASPath"
+    location: "eastus"
+    
+    vpn_gateway:
+      enabled: false
+    
+    express_route_gateway:
+      enabled: false
+
+  hub3:
+    enabled: false
+    name: "hub3-dev"
+    address_prefix: "192.169.2.0/16"
+    sku: "Standard"
+    hub_routing_preference: "ASPath"
+    location: "eastus"
+    
+    vpn_gateway:
+      enabled: false
+    
+    express_route_gateway:
+      enabled: false
+
+  hub4:
+    enabled: false
+    name: "hub4-dev"
+    address_prefix: "192.169.3.0/16"
+    sku: "Standard"
+    hub_routing_preference: "ASPath"
+    location: "eastus"
+    
+    vpn_gateway:
+      enabled: false
+    
+    express_route_gateway:
+      enabled: false
+
+# Spoke VNets Configuration
+spoke_vnets:
+  dev-vnet:
+    enabled: true
+    name: "vnet-dev"
+    type: "development"
+    address_space: "172.16.0.0/16"
+    hub_connection: "hub1-dev"
+    internet_security_enabled: true
+    
+    subnets:
+      - name: "dev-subnet"
+        address_prefix: "172.16.1.0/24"
+        delegation: null
+
+# Deployment Settings
+deployment:
+  auto_approve: true
+  parallel_deployment: false
+  max_parallel_hubs: 2
+  timeout_minutes: 30 

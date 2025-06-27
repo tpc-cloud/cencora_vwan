@@ -1,7 +1,0 @@
-name: "hub3-${environment}"
-address_prefix: "10.2.0.0/24"
-sku: "Standard"
-hub_routing_preference: "VpnGateway"
-vpn_gateway:
-  name: "vpngw3-${environment}"
-  scale_unit: 1 

@@ -1,0 +1,568 @@
+name: Deploy Network Infrastructure
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'terraform/config/**/config.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'terraform/config/**/config.yml'
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  ARM_CLIENT_ID: "${{ secrets.AZURE_CLIENT_ID }}"
+  ARM_SUBSCRIPTION_ID: "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+  ARM_TENANT_ID: "${{ secrets.AZURE_TENANT_ID }}"
+
+jobs:
+  analyze-changes:
+    name: 'Analyze Configuration Changes'
+    runs-on: ubuntu-latest
+    outputs:
+      vwan_core_changed: ${{ steps.check-diff.outputs.vwan_core_changed }}
+      hubs_changed: ${{ steps.check-diff.outputs.hubs_changed }}
+      deployment_changed: ${{ steps.check-diff.outputs.deployment_changed }}
+      config_changed: ${{ steps.check-diff.outputs.config_changed }}
+      environments_changed: ${{ steps.check-diff.outputs.environments_changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2 # Needed to access previous commit for diff
+      
+      - name: Analyze config.yml changes
+        id: check-diff
+        run: |
+          # Get the diff of config.yml files between the current and previous commit
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # For PRs, compare with base branch
+            git fetch origin ${{ github.event.pull_request.base.ref }}
+            git diff origin/${{ github.event.pull_request.base.ref }}..HEAD -- terraform/config/ > config_diff.txt
+          else
+            # For pushes, compare with previous commit
+            git diff HEAD^ HEAD -- terraform/config/ > config_diff.txt
+          fi
+          
+          echo "Configuration changes detected:"
+          cat config_diff.txt || echo "No changes found"
+          
+          # Check for changes in specific sections across all environment configs
+          if grep -E '^\+[[:space:]]*vwan_core:' config_diff.txt || grep -E '^-.*vwan_core:' config_diff.txt; then
+            echo "vwan_core_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "vwan_core_changed=false" >> $GITHUB_OUTPUT
+          fi
+          
+          if grep -E '^\+[[:space:]]*hubs:' config_diff.txt || grep -E '^-.*hubs:' config_diff.txt; then
+            echo "hubs_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "hubs_changed=false" >> $GITHUB_OUTPUT
+          fi
+          
+          if grep -E '^\+[[:space:]]*deployment:' config_diff.txt || grep -E '^-.*deployment:' config_diff.txt; then
+            echo "deployment_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "deployment_changed=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Check if any config changes occurred
+          if [ -s config_diff.txt ]; then
+            echo "config_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "config_changed=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Get list of environments that have changes
+          CHANGED_ENVS=$(grep -E '^[+-][[:space:]]*terraform/config/' config_diff.txt | sed 's|^[+-][[:space:]]*terraform/config/\([^/]*\)/.*|\1|' | sort -u | tr '\n' ',' | sed 's/,$//')
+          if [ -n "$CHANGED_ENVS" ]; then
+            echo "environments_changed=$CHANGED_ENVS" >> $GITHUB_OUTPUT
+          else
+            echo "environments_changed=" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "Change Analysis Results:"
+          echo "  VWAN Core: ${{ steps.check-diff.outputs.vwan_core_changed }}"
+          echo "  Hubs: ${{ steps.check-diff.outputs.hubs_changed }}"
+          echo "  Deployment: ${{ steps.check-diff.outputs.deployment_changed }}"
+          echo "  Config: ${{ steps.check-diff.outputs.config_changed }}"
+          echo "  Environments: ${{ steps.check-diff.outputs.environments_changed }}"
+
+  plan-vwan-core:
+    name: 'Plan VWAN Core Changes'
+    needs: analyze-changes
+    if: needs.analyze-changes.outputs.vwan_core_changed == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    env:
+      TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    defaults:
+      run:
+        working-directory: ./terraform
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.2"
+
+      - name: Setup Backend Storage
+        id: storage
+        run: |
+          RESOURCE_GROUP="rg-tf-state"
+          STORAGE_ACCOUNT="sttfstatecencoraprod"
+          CONTAINER_NAME="tfstate"
+          LOCATION="eastus"
+
+          # Check if resource group exists, create if not
+          if ! az group show --name $RESOURCE_GROUP &> /dev/null; then
+            echo "Creating resource group $RESOURCE_GROUP..."
+            az group create --name $RESOURCE_GROUP --location $LOCATION
+          else
+            echo "Resource group $RESOURCE_GROUP already exists"
+          fi
+          
+          if ! az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
+            az storage account create \
+                --name $STORAGE_ACCOUNT \
+                --resource-group $RESOURCE_GROUP \
+                --location $LOCATION \
+                --sku Standard_LRS \
+                --encryption-services blob
+          fi
+
+          az storage container create \
+              --name $CONTAINER_NAME \
+              --account-name $STORAGE_ACCOUNT
+
+          echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
+
+      - name: Plan VWAN Core Infrastructure
+        id: plan
+        run: |
+          # Get changed environments
+          CHANGED_ENVS="${{ needs.analyze-changes.outputs.environments_changed }}"
+          PLAN_OUTPUT=""
+          PLANNED_ENVIRONMENTS=""
+          
+          for env in ${CHANGED_ENVS//,/ }; do
+            echo "Planning VWAN core for environment: $env"
+            
+            # Check if config file exists for this environment
+            if [ ! -f "config/$env/config.yml" ]; then
+              echo "Config file not found for environment: $env, skipping"
+              continue
+            fi
+            
+            # Parse config to check if VWAN core is enabled
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  vwan_core = config.get('vwan_core', {})
+                  if vwan_core.get('enabled', False):
+                      print('enabled')
+                  else:
+                      print('disabled')
+                      
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            > vwan_core_status_${env}.txt
+            
+            VWAN_CORE_STATUS=$(cat vwan_core_status_${env}.txt)
+            
+            if [ "$VWAN_CORE_STATUS" != "enabled" ]; then
+              echo "VWAN core is disabled for environment: $env, skipping"
+              continue
+            fi
+            
+            # Check if resource group exists
+            RESOURCE_GROUP="rg-vwan-${env}"
+            if ! az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+              echo "Resource group '$RESOURCE_GROUP' does not exist. Please create it using:"
+              echo "  ./scripts/manage-resource-groups.sh create $env"
+              continue
+            fi
+            
+            # Add to planned environments list
+            if [ -n "$PLANNED_ENVIRONMENTS" ]; then
+              PLANNED_ENVIRONMENTS="$PLANNED_ENVIRONMENTS, $env"
+            else
+              PLANNED_ENVIRONMENTS="$env"
+            fi
+            
+            # Create environment-specific directory
+            mkdir -p vwan-core-${env}
+            cp main-vwan-core.tf vwan-core-${env}/main.tf
+            cp variables.tf vwan-core-${env}/
+            
+            # Create backend configuration for this environment
+            cat > vwan-core-${env}/backend.tf << EOF
+          terraform {
+            backend "azurerm" {
+              resource_group_name  = "rg-tf-state"
+              storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+              container_name       = "tfstate"
+              key                  = "vwan-core-${env}.tfstate"
+              use_oidc             = true
+            }
+          }
+          EOF
+            
+            # Generate terraform.tfvars from config.yml
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  vwan_core = config.get('vwan_core', {})
+                  firewall = vwan_core.get('firewall', {})
+                  
+                  tfvars = f'''client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"
+              tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"
+              subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"
+              environment = \"{config.get('environment', '$env')}\"
+              location = \"{config.get('region', 'eastus')}\"
+              '''
+                  
+                  with open('vwan-core-$env/terraform.tfvars', 'w') as f:
+                      f.write(tfvars)
+                      
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            
+            # Run terraform plan
+            cd vwan-core-${env}
+            terraform init -reconfigure
+            terraform plan -no-color -var-file="terraform.tfvars" -input=false -detailed-exitcode >> ../plan_output.txt 2>&1 || echo "Plan completed with exit code $?" >> ../plan_output.txt
+            
+            echo "" >> ../plan_output.txt
+            echo "--- Environment: $env ---" >> ../plan_output.txt
+            echo "" >> ../plan_output.txt
+            
+            cd ..
+          done
+          
+          PLAN_OUTPUT=$(cat plan_output.txt)
+          echo "plan_output<<EOF" >> $GITHUB_OUTPUT
+          echo "$PLAN_OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          echo "planned_environments=$PLANNED_ENVIRONMENTS" >> $GITHUB_OUTPUT
+
+      - name: Comment VWAN Core Plan Results
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `## VWAN Core Infrastructure Plan Results
+            
+            **Component:** Virtual WAN Core Infrastructure
+            **PR:** #${context.payload.pull_request.number}
+            **Branch:** ${context.payload.pull_request.head.ref}
+            **Commit:** ${context.sha}
+            **Environments:** ${process.env.PLANNED_ENVIRONMENTS}
+            
+            \`\`\`
+            ${process.env.PLAN_OUTPUT}
+            \`\`\`
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+        env:
+          PLAN_OUTPUT: ${{ steps.plan.outputs.plan_output }}
+          PLANNED_ENVIRONMENTS: ${{ steps.plan.outputs.planned_environments }}
+
+  plan-hubs:
+    name: 'Plan Hub Changes'
+    needs: analyze-changes
+    if: needs.analyze-changes.outputs.hubs_changed == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    env:
+      TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    defaults:
+      run:
+        working-directory: ./terraform
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.2"
+
+      - name: Setup Backend Storage
+        id: storage
+        run: |
+          RESOURCE_GROUP="rg-tf-state"
+          STORAGE_ACCOUNT="sttfstatecencoraprod"
+          CONTAINER_NAME="tfstate"
+          LOCATION="eastus"
+
+          # Check if resource group exists, create if not
+          if ! az group show --name $RESOURCE_GROUP &> /dev/null; then
+            echo "Creating resource group $RESOURCE_GROUP..."
+            az group create --name $RESOURCE_GROUP --location $LOCATION
+          else
+            echo "Resource group $RESOURCE_GROUP already exists"
+          fi
+          
+          if ! az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
+            az storage account create \
+                --name $STORAGE_ACCOUNT \
+                --resource-group $RESOURCE_GROUP \
+                --location $LOCATION \
+                --sku Standard_LRS \
+                --encryption-services blob
+          fi
+
+          az storage container create \
+              --name $CONTAINER_NAME \
+              --account-name $STORAGE_ACCOUNT
+
+          echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
+
+      - name: Plan Hub Infrastructure
+        id: plan
+        run: |
+          # Get changed environments
+          CHANGED_ENVS="${{ needs.analyze-changes.outputs.environments_changed }}"
+          PLAN_OUTPUT=""
+          PLANNED_ENVIRONMENTS=""
+          PLANNED_HUBS=""
+          
+          for env in ${CHANGED_ENVS//,/ }; do
+            echo "Planning hubs for environment: $env"
+            
+            # Check if config file exists for this environment
+            if [ ! -f "config/$env/config.yml" ]; then
+              echo "Config file not found for environment: $env, skipping"
+              continue
+            fi
+            
+            # Check if resource group exists
+            RESOURCE_GROUP="rg-vwan-${env}"
+            if ! az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+              echo "Resource group '$RESOURCE_GROUP' does not exist. Please create it using:"
+              echo "  ./scripts/manage-resource-groups.sh create $env"
+              continue
+            fi
+            
+            # Parse config to get enabled hubs
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  hubs = config.get('hubs', {})
+                  enabled_hubs = []
+                  
+                  for hub_name, hub_config in hubs.items():
+                      if hub_config.get('enabled', False):
+                          enabled_hubs.append(hub_name)
+                  
+                  print(' '.join(enabled_hubs))
+                  
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            > enabled_hubs_${env}.txt
+            
+            ENABLED_HUBS=$(cat enabled_hubs_${env}.txt)
+            
+            if [ -z "$ENABLED_HUBS" ]; then
+              echo "No enabled hubs found for environment: $env"
+              continue
+            fi
+            
+            # Add to planned environments list
+            if [ -n "$PLANNED_ENVIRONMENTS" ]; then
+              PLANNED_ENVIRONMENTS="$PLANNED_ENVIRONMENTS, $env"
+            else
+              PLANNED_ENVIRONMENTS="$env"
+            fi
+            
+            # Process each enabled hub
+            for hub in $ENABLED_HUBS; do
+              echo "Planning hub: $hub for environment: $env"
+              
+              # Add to planned hubs list
+              if [ -n "$PLANNED_HUBS" ]; then
+                PLANNED_HUBS="$PLANNED_HUBS, $env:$hub"
+              else
+                PLANNED_HUBS="$env:$hub"
+              fi
+              
+              # Create a clean directory for this hub
+              mkdir -p hub-${env}-${hub}
+              cp variables.tf hub-${env}-${hub}/
+              cp main-hubs.tf hub-${env}-${hub}/main.tf
+              
+              # Create backend.tf file for this hub
+              cat > hub-${env}-${hub}/backend.tf << EOF
+            terraform {
+              backend "azurerm" {
+                resource_group_name  = "rg-tf-state"
+                storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+                container_name       = "tfstate"
+                key                  = "${env}/${hub}.tfstate"
+                use_oidc             = true
+              }
+            }
+            EOF
+              
+              # Generate terraform.tfvars from config.yml
+              python3 -c |
+                import yaml
+                import sys
+                
+                try:
+                    with open('config/$env/config.yml', 'r') as f:
+                        config = yaml.safe_load(f)
+                    
+                    tfvars = f'''client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"
+                tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"
+                subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"
+                environment = \"{config.get('environment', '$env')}\"
+                hub_name = \"{hub}\"
+                location = \"{config.get('region', 'eastus')}\"
+                '''
+                    
+                    with open('hub-$env-$hub/terraform.tfvars', 'w') as f:
+                        f.write(tfvars)
+                        
+                except Exception as e:
+                    print(f'Error processing config for $env hub $hub: {e}')
+                    sys.exit(1)
+              
+              # Run terraform in the hub directory
+              cd hub-${env}-${hub}
+              terraform init -reconfigure
+              
+              # Run terraform plan and capture output
+              echo "## Environment: $env - Hub: $hub" >> ../plan_output.txt
+              terraform plan -no-color -var-file="terraform.tfvars" -input=false -detailed-exitcode >> ../plan_output.txt 2>&1 || echo "Plan completed with exit code $?" >> ../plan_output.txt
+              echo "" >> ../plan_output.txt
+              echo "---" >> ../plan_output.txt
+              echo "" >> ../plan_output.txt
+              cd ..
+            done
+          done
+          
+          # Save plan output for comment
+          PLAN_OUTPUT=$(cat plan_output.txt)
+          echo "plan_output<<EOF" >> $GITHUB_OUTPUT
+          echo "$PLAN_OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          echo "planned_environments=$PLANNED_ENVIRONMENTS" >> $GITHUB_OUTPUT
+          echo "planned_hubs=$PLANNED_HUBS" >> $GITHUB_OUTPUT
+
+      - name: Comment Hub Plan Results
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `## Hub Infrastructure Plan Results
+            
+            **Component:** Virtual WAN Hubs
+            **PR:** #${context.payload.pull_request.number}
+            **Branch:** ${context.payload.pull_request.head.ref}
+            **Commit:** ${context.sha}
+            **Environments:** ${process.env.PLANNED_ENVIRONMENTS}
+            **Hubs:** ${process.env.PLANNED_HUBS}
+            
+            \`\`\`
+            ${process.env.PLAN_OUTPUT}
+            \`\`\`
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+        env:
+          PLAN_OUTPUT: ${{ steps.plan.outputs.plan_output }}
+          PLANNED_ENVIRONMENTS: ${{ steps.plan.outputs.planned_environments }}
+          PLANNED_HUBS: ${{ steps.plan.outputs.planned_hubs }}
+
+  deploy-vwan-core:
+    name: 'Deploy VWAN Core Changes'
+    needs: [analyze-changes, plan-vwan-core]
+    if: needs.analyze-changes.outputs.vwan_core_changed == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Deploy VWAN Core
+        run: |
+          echo "Deploying VWAN core changes..."
+          echo "This would contain the apply logic for VWAN core"
+          echo "based on the config.yml vwan_core section"
+
+  deploy-hubs:
+    name: 'Deploy Hub Changes'
+    needs: [analyze-changes, plan-hubs]
+    if: needs.analyze-changes.outputs.hubs_changed == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Deploy Hub Changes
+        run: |
+          echo "Deploying hub changes..."
+          echo "This would contain the apply logic for hubs"
+          echo "based on the config.yml hubs section" 

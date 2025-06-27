@@ -1,0 +1,424 @@
+name: Deploy Spoke VNets
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'terraform/config/**/config.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'terraform/config/**/config.yml'
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  ARM_CLIENT_ID: "${{ secrets.AZURE_CLIENT_ID }}"
+  ARM_SUBSCRIPTION_ID: "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+  ARM_TENANT_ID: "${{ secrets.AZURE_TENANT_ID }}"
+
+jobs:
+  analyze-spoke-changes:
+    name: 'Analyze Spoke VNet Changes'
+    runs-on: ubuntu-latest
+    outputs:
+      spoke_vnets_changed: ${{ steps.check-diff.outputs.spoke_vnets_changed }}
+      environments_changed: ${{ steps.check-diff.outputs.environments_changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      
+      - name: Analyze spoke_vnets changes
+        id: check-diff
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin ${{ github.event.pull_request.base.ref }}
+            git diff origin/${{ github.event.pull_request.base.ref }}..HEAD -- terraform/config/ > config_diff.txt
+          else
+            git diff HEAD^ HEAD -- terraform/config/ > config_diff.txt
+          fi
+          
+          if grep -E '^\+[[:space:]]*spoke_vnets:' config_diff.txt || grep -E '^-.*spoke_vnets:' config_diff.txt; then
+            echo "spoke_vnets_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "spoke_vnets_changed=false" >> $GITHUB_OUTPUT
+          fi
+          
+          CHANGED_ENVS=$(grep -E '^[+-][[:space:]]*terraform/config/' config_diff.txt | sed 's|^[+-][[:space:]]*terraform/config/\([^/]*\)/.*|\1|' | sort -u | tr '\n' ',' | sed 's/,$//')
+          if [ -n "$CHANGED_ENVS" ]; then
+            echo "environments_changed=$CHANGED_ENVS" >> $GITHUB_OUTPUT
+          else
+            echo "environments_changed=" >> $GITHUB_OUTPUT
+          fi
+
+  plan-spoke-vnets:
+    name: 'Plan Spoke VNet Changes'
+    needs: analyze-spoke-changes
+    if: needs.analyze-spoke-changes.outputs.spoke_vnets_changed == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    env:
+      TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    defaults:
+      run:
+        working-directory: ./terraform
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.2"
+
+      - name: Setup Backend Storage
+        id: storage
+        run: |
+          RESOURCE_GROUP="rg-tf-state"
+          STORAGE_ACCOUNT="sttfstatecencoraprod"
+          CONTAINER_NAME="tfstate"
+          LOCATION="eastus"
+
+          if ! az group show --name $RESOURCE_GROUP &> /dev/null; then
+            echo "Creating resource group $RESOURCE_GROUP..."
+            az group create --name $RESOURCE_GROUP --location $LOCATION
+          else
+            echo "Resource group $RESOURCE_GROUP already exists"
+          fi
+          
+          if ! az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
+            az storage account create \
+                --name $STORAGE_ACCOUNT \
+                --resource-group $RESOURCE_GROUP \
+                --location $LOCATION \
+                --sku Standard_LRS \
+                --encryption-services blob
+          fi
+
+          az storage container create \
+              --name $CONTAINER_NAME \
+              --account-name $STORAGE_ACCOUNT
+
+          echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
+
+      - name: Plan Spoke VNet Infrastructure
+        id: plan
+        run: |
+          CHANGED_ENVS="${{ needs.analyze-spoke-changes.outputs.environments_changed }}"
+          PLAN_OUTPUT=""
+          PLANNED_ENVIRONMENTS=""
+          PLANNED_VNETS=""
+          
+          for env in ${CHANGED_ENVS//,/ }; do
+            echo "Planning spoke VNets for environment: $env"
+            
+            if [ ! -f "config/$env/config.yml" ]; then
+              echo "Config file not found for environment: $env, skipping"
+              continue
+            fi
+            
+            RESOURCE_GROUP="rg-vwan-${env}"
+            if ! az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+              echo "Resource group '$RESOURCE_GROUP' does not exist. Please create it using:"
+              echo "  ./scripts/manage-resource-groups.sh create $env"
+              continue
+            fi
+            
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  spoke_vnets = config.get('spoke_vnets', {})
+                  enabled_vnets = []
+                  
+                  for vnet_name, vnet_config in spoke_vnets.items():
+                      if vnet_config.get('enabled', False):
+                          enabled_vnets.append(vnet_name)
+                  
+                  print(' '.join(enabled_vnets))
+                  
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            > enabled_vnets_${env}.txt
+            
+            ENABLED_VNETS=$(cat enabled_vnets_${env}.txt)
+            
+            if [ -z "$ENABLED_VNETS" ]; then
+              echo "No enabled spoke VNets found for environment: $env"
+              continue
+            fi
+            
+            if [ -n "$PLANNED_ENVIRONMENTS" ]; then
+              PLANNED_ENVIRONMENTS="$PLANNED_ENVIRONMENTS, $env"
+            else
+              PLANNED_ENVIRONMENTS="$env"
+            fi
+            
+            for vnet in $ENABLED_VNETS; do
+              if [ -n "$PLANNED_VNETS" ]; then
+                PLANNED_VNETS="$PLANNED_VNETS, $env:$vnet"
+              else
+                PLANNED_VNETS="$env:$vnet"
+              fi
+            done
+            
+            mkdir -p spoke-vnets-${env}
+            cp main-spoke-vnets.tf spoke-vnets-${env}/main.tf
+            cp variables.tf spoke-vnets-${env}/
+            
+            cat > spoke-vnets-${env}/backend.tf << EOF
+          terraform {
+            backend "azurerm" {
+              resource_group_name  = "rg-tf-state"
+              storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+              container_name       = "tfstate"
+              key                  = "spoke-vnets-${env}.tfstate"
+              use_oidc             = true
+            }
+          }
+          EOF
+            
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  tfvars = f'''client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"
+              tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"
+              subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"
+              environment = \"{config.get('environment', '$env')}\"
+              location = \"{config.get('region', 'eastus')}\"
+              '''
+                  
+                  with open('spoke-vnets-$env/terraform.tfvars', 'w') as f:
+                      f.write(tfvars)
+                      
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            
+            cd spoke-vnets-${env}
+            terraform init -reconfigure
+            terraform plan -no-color -var-file="terraform.tfvars" -input=false -detailed-exitcode >> ../plan_output.txt 2>&1 || echo "Plan completed with exit code $?" >> ../plan_output.txt
+            
+            echo "" >> ../plan_output.txt
+            echo "--- Environment: $env ---" >> ../plan_output.txt
+            echo "" >> ../plan_output.txt
+            
+            cd ..
+          done
+          
+          PLAN_OUTPUT=$(cat plan_output.txt)
+          echo "plan_output<<EOF" >> $GITHUB_OUTPUT
+          echo "$PLAN_OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          echo "planned_environments=$PLANNED_ENVIRONMENTS" >> $GITHUB_OUTPUT
+          echo "planned_vnets=$PLANNED_VNETS" >> $GITHUB_OUTPUT
+
+      - name: Comment Spoke VNet Plan Results
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `## Spoke VNet Infrastructure Plan Results
+            
+            **Component:** Spoke Virtual Networks
+            **PR:** #${context.payload.pull_request.number}
+            **Branch:** ${context.payload.pull_request.head.ref}
+            **Commit:** ${context.sha}
+            **Environments:** ${process.env.PLANNED_ENVIRONMENTS}
+            **VNets:** ${process.env.PLANNED_VNETS}
+            
+            \`\`\`
+            ${process.env.PLAN_OUTPUT}
+            \`\`\`
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+        env:
+          PLAN_OUTPUT: ${{ steps.plan.outputs.plan_output }}
+          PLANNED_ENVIRONMENTS: ${{ steps.plan.outputs.planned_environments }}
+          PLANNED_VNETS: ${{ steps.plan.outputs.planned_vnets }}
+
+  deploy-spoke-vnets:
+    name: 'Deploy Spoke VNet Changes'
+    needs: [analyze-spoke-changes, plan-spoke-vnets]
+    if: needs.analyze-spoke-changes.outputs.spoke_vnets_changed == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    env:
+      TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    defaults:
+      run:
+        working-directory: ./terraform
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.2"
+
+      - name: Setup Backend Storage
+        id: storage
+        run: |
+          RESOURCE_GROUP="rg-tf-state"
+          STORAGE_ACCOUNT="sttfstatecencoraprod"
+          CONTAINER_NAME="tfstate"
+          LOCATION="eastus"
+
+          if ! az group show --name $RESOURCE_GROUP &> /dev/null; then
+            echo "Creating resource group $RESOURCE_GROUP..."
+            az group create --name $RESOURCE_GROUP --location $LOCATION
+          else
+            echo "Resource group $RESOURCE_GROUP already exists"
+          fi
+          
+          if ! az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
+            az storage account create \
+                --name $STORAGE_ACCOUNT \
+                --resource-group $RESOURCE_GROUP \
+                --location $LOCATION \
+                --sku Standard_LRS \
+                --encryption-services blob
+          fi
+
+          az storage container create \
+              --name $CONTAINER_NAME \
+              --account-name $STORAGE_ACCOUNT
+
+          echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
+
+      - name: Deploy Spoke VNet Infrastructure
+        run: |
+          CHANGED_ENVS="${{ needs.analyze-spoke-changes.outputs.environments_changed }}"
+          
+          for env in ${CHANGED_ENVS//,/ }; do
+            echo "Deploying spoke VNets for environment: $env"
+            
+            if [ ! -f "config/$env/config.yml" ]; then
+              echo "Config file not found for environment: $env, skipping"
+              continue
+            fi
+            
+            RESOURCE_GROUP="rg-vwan-${env}"
+            if ! az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+              echo "Resource group '$RESOURCE_GROUP' does not exist. Please create it using:"
+              echo "  ./scripts/manage-resource-groups.sh create $env"
+              continue
+            fi
+            
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  spoke_vnets = config.get('spoke_vnets', {})
+                  enabled_vnets = []
+                  
+                  for vnet_name, vnet_config in spoke_vnets.items():
+                      if vnet_config.get('enabled', False):
+                          enabled_vnets.append(vnet_name)
+                  
+                  print(' '.join(enabled_vnets))
+                  
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            > enabled_vnets_${env}.txt
+            
+            ENABLED_VNETS=$(cat enabled_vnets_${env}.txt)
+            
+            if [ -z "$ENABLED_VNETS" ]; then
+              echo "No enabled spoke VNets found for environment: $env"
+              continue
+            fi
+            
+            mkdir -p spoke-vnets-${env}
+            cp main-spoke-vnets.tf spoke-vnets-${env}/main.tf
+            cp variables.tf spoke-vnets-${env}/
+            
+            cat > spoke-vnets-${env}/backend.tf << EOF
+          terraform {
+            backend "azurerm" {
+              resource_group_name  = "rg-tf-state"
+              storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+              container_name       = "tfstate"
+              key                  = "spoke-vnets-${env}.tfstate"
+              use_oidc             = true
+            }
+          }
+          EOF
+            
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  tfvars = f'''client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"
+              tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"
+              subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"
+              environment = \"{config.get('environment', '$env')}\"
+              location = \"{config.get('region', 'eastus')}\"
+              '''
+                  
+                  with open('spoke-vnets-$env/terraform.tfvars', 'w') as f:
+                      f.write(tfvars)
+                      
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            
+            cd spoke-vnets-${env}
+            terraform init -reconfigure
+            terraform apply -auto-approve -var-file="terraform.tfvars" -input=false
+            cd ..
+          done 

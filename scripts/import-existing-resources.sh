@@ -20,6 +20,13 @@ echo "Subscription ID: $SUBSCRIPTION_ID"
 # Set Azure context
 az account set --subscription "$SUBSCRIPTION_ID"
 
+# Check if config file exists for this environment
+CONFIG_FILE="terraform/config/$ENVIRONMENT/config.yml"
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Config file not found: $CONFIG_FILE"
+    exit 1
+fi
+
 # Check and import resource group
 RESOURCE_GROUP="rg-vwan-$ENVIRONMENT"
 echo "Checking resource group: $RESOURCE_GROUP"
@@ -40,13 +47,34 @@ else
     echo "Virtual WAN $VWAN_NAME does not exist"
 fi
 
-# Check and import Virtual Hubs
-echo "Checking Virtual Hubs..."
-for hub_file in terraform/config/hubs/*.yaml; do
-    if [ -f "$hub_file" ]; then
-        hub_name=$(basename "$hub_file" .yaml)
-        hub_display_name=$(grep "name:" "$hub_file" | head -1 | sed 's/.*name: *"\([^"]*\)".*/\1/' | sed "s/\${environment}/$ENVIRONMENT/g")
+# Check and import Virtual Hubs from config
+echo "Checking Virtual Hubs from config..."
+python3 -c "
+import yaml
+import sys
+
+try:
+    with open('$CONFIG_FILE', 'r') as f:
+        config = yaml.safe_load(f)
+    
+    hubs = config.get('hubs', {})
+    enabled_hubs = []
+    
+    for hub_name, hub_config in hubs.items():
+        if hub_config.get('enabled', False):
+            enabled_hubs.append((hub_name, hub_config.get('name', f'{hub_name}-$ENVIRONMENT')))
+    
+    for hub_name, hub_display_name in enabled_hubs:
+        print(f'{hub_name}:{hub_display_name}')
         
+except Exception as e:
+    print(f'Error processing config: {e}')
+    sys.exit(1)
+" > enabled_hubs_${ENVIRONMENT}.txt
+
+# Import each enabled hub
+while IFS=: read -r hub_name hub_display_name; do
+    if [ -n "$hub_display_name" ]; then
         echo "Checking Virtual Hub: $hub_display_name"
         if az network vhub show --name "$hub_display_name" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
             echo "Importing Virtual Hub: $hub_display_name"
@@ -55,6 +83,9 @@ for hub_file in terraform/config/hubs/*.yaml; do
             echo "Virtual Hub $hub_display_name does not exist"
         fi
     fi
-done
+done < enabled_hubs_${ENVIRONMENT}.txt
+
+# Clean up temporary file
+rm -f enabled_hubs_${ENVIRONMENT}.txt
 
 echo "Import process completed!" 

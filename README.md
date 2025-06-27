@@ -1,259 +1,416 @@
-# Azure Virtual WAN Deployment
+# Azure Virtual WAN Infrastructure with Terraform
 
-This repository contains Terraform configurations and GitHub Actions workflows to deploy and manage Azure Virtual WAN infrastructure. The architecture separates the Virtual WAN core infrastructure from individual hub deployments, allowing for targeted updates and better resource management.
+This repository contains Terraform configurations for deploying and managing Azure Virtual WAN infrastructure with multiple hubs, firewall rules, and related resources.
 
 ## Architecture Overview
 
-The deployment is split into two distinct workflows:
+The Virtual WAN infrastructure consists of:
 
-### 1. Virtual WAN Core (`terraform-virtualwan-core.yml`)
-- **Purpose**: Creates the Virtual WAN itself (runs once)
-- **Trigger**: Manual workflow dispatch
-- **State File**: `prod/vwan-core.tfstate`
-- **Resources**: Virtual WAN resource only
+- **Virtual WAN Core**: Central hub with Azure Firewall for security
+- **Virtual Hubs**: Regional hubs for connecting branch offices, VNets, and remote users
+- **VPN Gateways**: For site-to-site and point-to-site VPN connections
+- **ExpressRoute Gateways**: For private connectivity via ExpressRoute circuits
+- **Firewall Rules**: Network and application rules for traffic filtering
 
-### 2. Virtual WAN Hubs (`terraform-virtualwan.yml`)
-- **Purpose**: Creates individual hubs within the existing Virtual WAN
-- **Trigger**: Automatic on push to main (when hub configs change)
-- **State Files**: `prod/hub1.tfstate`, `prod/hub2.tfstate`, etc.
-- **Resources**: Virtual Hub, VPN Gateway, ExpressRoute Gateway for specific hub
+## Configuration Structure
+
+The Virtual WAN configuration is organized by environment in the `terraform/config/{environment}/` directory. Each environment has its own `config.yml` file that defines:
+
+- Environment settings (name, region)
+- Virtual WAN core configuration
+- Hub configurations with enabled/disabled status
+- Firewall rules
+- Deployment settings
+
+### Environment Configuration Files
+
+- `terraform/config/prod/config.yml` - Production environment
+- `terraform/config/dev/config.yml` - Development environment  
+- `terraform/config/staging/config.yml` - Staging environment
+
+Each config file controls what gets deployed and updated in that specific environment.
 
 ## Prerequisites
 
-1. Azure subscription
-2. GitHub repository
-3. Azure Service Principal with appropriate permissions
+- Azure CLI installed and authenticated
+- Terraform 1.0.0 or later
+- Azure subscription with appropriate permissions
+- GitHub repository with configured secrets
 
-## Setup Instructions
+### Required Azure Secrets
 
-1. Create an Azure Service Principal and configure OIDC authentication:
+Configure these secrets in your GitHub repository:
+
+- `AZURE_CLIENT_ID` - Service Principal Client ID
+- `AZURE_TENANT_ID` - Azure Tenant ID
+- `AZURE_SUBSCRIPTION_ID` - Azure Subscription ID
+
+## Quick Start
+
+### 1. Clone the Repository
 
 ```bash
-# Create Azure AD Application
-az ad app create --display-name "GitHub-Actions-vWAN"
-
-# Create Service Principal
-az ad sp create-for-rbac --name "github-actions-vwan" --role "Contributor" --scopes /subscriptions/<subscription-id>
-
-# Create credential.json file
-cat > credential.json << EOF
-{
-  "name": "github-vwan-actions",
-  "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:tpc-cloud/cencora_vwan:ref:refs/heads/main",
-  "description": "GitHub Actions OIDC for Virtual WAN",
-  "audiences": [
-    "api://AzureADTokenExchange"
-  ]
-}
-EOF
-
-# Create Federated Credential
-az ad app federated-credential create \
-  --id <app-id> \
-  --parameters credential.json
+git clone <repository-url>
+cd Cencora_vwans
 ```
 
-2. Add the following secrets to your GitHub repository:
-   - `AZURE_CLIENT_ID`: Service Principal Client ID
-   - `AZURE_TENANT_ID`: Azure Tenant ID
-   - `AZURE_SUBSCRIPTION_ID`: Azure Subscription ID
+### 2. Create Resource Groups
 
-3. The Terraform state storage account will be created automatically by the workflows.
+Before deploying infrastructure, create the required resource groups for each environment:
 
-## Configuration
+```bash
+# Create resource groups for all environments
+./scripts/manage-resource-groups.sh create prod eastus
+./scripts/manage-resource-groups.sh create dev eastus
+./scripts/manage-resource-groups.sh create staging eastus
 
-The Virtual WAN configuration is organized with one hub per file in the `terraform/config/hubs` directory. Each hub has its own YAML configuration file that defines its settings and associated gateways.
+# Or create them one by one
+./scripts/manage-resource-groups.sh create prod
+./scripts/manage-resource-groups.sh create dev
+./scripts/manage-resource-groups.sh create staging
+```
 
-### Hub Configuration Structure
+### 3. Configure Environment
 
-Each hub configuration file (e.g., `hub1.yaml`) follows this structure:
+Edit the appropriate environment config file:
+
+```bash
+# For production
+vim terraform/config/prod/config.yml
+
+# For development
+vim terraform/config/dev/config.yml
+
+# For staging
+vim terraform/config/staging/config.yml
+```
+
+### 4. Deploy Infrastructure
+
+The infrastructure is deployed automatically via GitHub Actions when you:
+
+- Push changes to the `main` branch (applies changes)
+- Create a pull request (runs plan and comments results)
+
+## Resource Group Management
+
+The infrastructure uses separate resource groups for each environment. Resource groups are managed using the provided script and should be created before deploying infrastructure.
+
+### Resource Group Naming Convention
+
+- **Production**: `rg-vwan-prod`
+- **Development**: `rg-vwan-dev`
+- **Staging**: `rg-vwan-staging`
+
+### Managing Resource Groups
+
+Use the `scripts/manage-resource-groups.sh` script to manage resource groups:
+
+```bash
+# Create a resource group
+./scripts/manage-resource-groups.sh create <environment> [location]
+
+# Examples:
+./scripts/manage-resource-groups.sh create prod eastus
+./scripts/manage-resource-groups.sh create dev
+./scripts/manage-resource-groups.sh create staging westus
+
+# Check if a resource group exists
+./scripts/manage-resource-groups.sh exists prod
+
+# Show resource group details
+./scripts/manage-resource-groups.sh show prod
+
+# List all VWAN resource groups
+./scripts/manage-resource-groups.sh list
+
+# Delete a resource group (WARNING: This deletes ALL resources!)
+./scripts/manage-resource-groups.sh delete prod
+```
+
+### Resource Group Requirements
+
+- Resource groups must exist before running Terraform
+- Each environment has its own resource group
+- Resource groups are created in the specified Azure region
+- The script checks for existing resource groups before creating new ones
+
+### Troubleshooting Resource Groups
+
+If you encounter resource group errors:
+
+1. **Check if resource group exists**:
+   ```bash
+   ./scripts/manage-resource-groups.sh exists <environment>
+   ```
+
+2. **Create missing resource group**:
+   ```bash
+   ./scripts/manage-resource-groups.sh create <environment>
+   ```
+
+3. **Verify resource group details**:
+   ```bash
+   ./scripts/manage-resource-groups.sh show <environment>
+   ```
+
+## Configuration Guide
+
+### Environment Settings
 
 ```yaml
-name: "hub1-${environment}"
-address_prefix: "10.0.0.0/24"
-sku: "Standard"
-hub_routing_preference: "ASPath"
-vpn_gateway:
-  name: "vpngw1-${environment}"
-  scale_unit: 1
-express_route_gateway:
-  name: "ergw1-${environment}"
-  scale_unit: 1
+environment: prod
+region: eastus
 ```
 
-### Configuration Parameters
+### Virtual WAN Core Configuration
 
-- `name`: Hub name (supports environment variable substitution)
-- `address_prefix`: CIDR block for the hub
-- `sku`: Hub SKU (Standard)
-- `hub_routing_preference`: Routing preference (ASPath, ExpressRoute, VpnGateway)
-- `vpn_gateway`: VPN Gateway configuration (optional)
-  - `name`: Gateway name
-  - `scale_unit`: Gateway scale unit
-- `express_route_gateway`: ExpressRoute Gateway configuration (optional)
-  - `name`: Gateway name
-  - `scale_unit`: Gateway scale unit
+```yaml
+vwan_core:
+  enabled: true
+  name: "vwan-prod"
+  resource_group: "rg-vwan-prod"
+  type: "Standard"
+  location: "eastus"
+  
+  firewall:
+    enabled: true
+    name: "fw-prod"
+    policy_name: "fw-policy-prod"
+    sku: "Standard"
+    public_ip_name: "pip-fw-prod"
+    vnet_name: "vnet-fw-prod"
+    vnet_address_space: "10.0.0.0/16"
+    firewall_subnet: "10.0.1.0/26"
+    management_subnet: "10.0.2.0/26"
+```
+
+### Hub Configuration
+
+```yaml
+hubs:
+  hub1:
+    enabled: true
+    name: "hub1-prod"
+    address_prefix: "192.168.0.0/16"
+    sku: "Standard"
+    hub_routing_preference: "ASPath"
+    location: "eastus"
+    
+    vpn_gateway:
+      enabled: true
+      name: "vpngw1-prod"
+      scale_unit: 1
+    
+    express_route_gateway:
+      enabled: true
+      name: "ergw1-prod"
+      scale_unit: 1
+```
+
+### Firewall Rules
+
+```yaml
+firewall_rules:
+  enabled: true
+  
+  network_rules:
+    - name: "allow-https"
+      protocol: "Https"
+      source_addresses: ["*"]
+      destination_addresses: ["*"]
+      destination_ports: ["443"]
+      action: "Allow"
+      priority: 100
+```
+
+### Spoke VNet Configuration
+
+Spoke VNets are application and workload networks that connect to Virtual WAN hubs. Configure them in the `spoke_vnets` section:
+
+```yaml
+spoke_vnets:
+  app-vnet:
+    enabled: true
+    name: "vnet-app-prod"
+    type: "application"
+    address_space: "172.16.0.0/16"
+    hub_connection: "hub1-prod"
+    internet_security_enabled: true
+    
+    subnets:
+      - name: "app-subnet"
+        address_prefix: "172.16.1.0/24"
+        delegation: null
+      - name: "db-subnet"
+        address_prefix: "172.16.2.0/24"
+        delegation: null
+    
+    network_security_group:
+      subnet_name: "app-subnet"
+      rules:
+        - name: "allow-https"
+          priority: 100
+          direction: "Inbound"
+          access: "Allow"
+          protocol: "Tcp"
+          source_port_range: "*"
+          destination_port_range: "443"
+          source_address_prefix: "*"
+          destination_address_prefix: "*"
+```
+
+**Configuration Options**:
+- `enabled`: Enable/disable the spoke VNet
+- `name`: VNet name (e.g., "vnet-app-prod")
+- `type`: VNet type (e.g., "application", "data", "development")
+- `address_space`: VNet address space (e.g., "172.16.0.0/16")
+- `hub_connection`: Hub to connect to (must match hub name)
+- `internet_security_enabled`: Enable/disable internet security
+- `subnets`: List of subnets with address prefixes
+- `network_security_group`: Optional NSG configuration
 
 ## Infrastructure Components
 
-The configuration deploys a comprehensive Virtual WAN setup with:
+This project manages the following Azure infrastructure components:
 
-### Virtual WAN Core
-- Single Virtual WAN resource per environment
-- Standard SKU
-- Centralized management
+### 1. Virtual WAN Core
+- **Virtual WAN**: Central networking hub for connecting multiple locations
+- **Azure Firewall**: Centralized network security with policy-based rules
+- **Firewall VNet**: Dedicated virtual network for the Azure Firewall
+- **Resource Group**: `rg-vwan-{environment}`
 
-### Virtual Hubs
-- **Hub 1 (ASPath)**
-  - Address Space: 10.0.0.0/24
-  - Associated VPN Gateway
-  - Associated ExpressRoute Gateway
-  - ASPath routing preference
+### 2. Virtual WAN Hubs
+- **Virtual Hubs**: Regional hubs for connecting VNets and on-premises networks
+- **VPN Gateways**: For site-to-site and point-to-site VPN connections
+- **ExpressRoute Gateways**: For private connections to on-premises networks
 
-- **Hub 2 (ExpressRoute)**
-  - Address Space: 10.1.0.0/24
-  - Associated VPN Gateway
-  - Associated ExpressRoute Gateway
-  - ExpressRoute routing preference
+### 3. Spoke Virtual Networks
+- **Spoke VNets**: Application and workload virtual networks
+- **Subnets**: Network segments for different application tiers
+- **Network Security Groups**: Traffic filtering rules
+- **Hub Connections**: Direct connections to Virtual WAN hubs
 
-- **Hub 3 (VPN)**
-  - Address Space: 10.2.0.0/24
-  - Associated VPN Gateway
-  - VPN Gateway routing preference
+## Workflows
 
-- **Hub 4 (ASPath)**
-  - Address Space: 10.3.0.0/24
-  - Associated VPN Gateway
-  - ASPath routing preference
+The project uses several GitHub Actions workflows to manage different infrastructure components:
 
-### Gateways
-- VPN Gateways for each hub
-- ExpressRoute Gateways for Hub 1 and Hub 2
-- Standard SKU for all gateways
-- Scale units configured for each gateway
+### 1. `deploy-network.yml`
+- **Purpose**: Main workflow for VWAN core and hub infrastructure
+- **Triggers**: Changes to `terraform/config/**/config.yml`
+- **Components**: VWAN core, Virtual Hubs, VPN/ExpressRoute Gateways
+- **Jobs**: Plan and deploy VWAN core and hub changes
 
-### Routing Preferences
-- ASPath: Optimized for general routing
-- ExpressRoute: Optimized for ExpressRoute connections
-- VPNGateway: Optimized for VPN connections
+### 2. `deploy-spoke-vnets.yml`
+- **Purpose**: Manages spoke virtual networks
+- **Triggers**: Changes to `spoke_vnets` section in config files
+- **Components**: Spoke VNets, Subnets, NSGs, Hub Connections
+- **Jobs**: Plan and deploy spoke VNet changes
 
-## Deployment Process
+### 3. `terraform-virtualwan.yml`
+- **Purpose**: Legacy workflow for hub management
+- **Status**: Maintained for backward compatibility
 
-### Initial Setup
+### 4. `terraform-virtualwan-core.yml`
+- **Purpose**: Legacy workflow for VWAN core management
+- **Status**: Maintained for backward compatibility
 
-1. **Deploy Virtual WAN Core**:
-   - Go to Actions → "Terraform Virtual WAN Core"
-   - Click "Run workflow"
-   - Select environment (prod, dev, test)
-   - Click "Run workflow"
-   - This creates the Virtual WAN infrastructure
+### 5. `terraform-virtualwan-destroy.yml`
+- **Purpose**: Infrastructure destruction workflow
+- **Usage**: Manual trigger for cleanup operations
 
-2. **Deploy Hubs**:
-   - Modify hub configuration files in `terraform/config/hubs/`
-   - Push changes to main branch
-   - The hub workflow will automatically run and deploy only the changed hubs
+## Managing Infrastructure
 
-### Importing Existing Resources
+### Adding a New Hub
 
-If you have existing Azure resources that were created outside of Terraform, the workflows will automatically attempt to import them. However, if you need to manually import resources, you can use the provided script:
+1. Edit the appropriate environment config file
+2. Add a new hub configuration under the `hubs` section
+3. Set `enabled: true` to deploy it
+4. Commit and push changes
 
-```bash
-# Make sure you're in the terraform directory
-cd terraform
-
-# Run the import script
-../scripts/import-existing-resources.sh prod <your-subscription-id>
+Example:
+```yaml
+hubs:
+  hub5:
+    enabled: true
+    name: "hub5-prod"
+    address_prefix: "192.168.4.0/16"
+    sku: "Standard"
+    hub_routing_preference: "ASPath"
+    location: "eastus"
+    
+    vpn_gateway:
+      enabled: false
+    
+    express_route_gateway:
+      enabled: true
+      name: "ergw5-prod"
+      scale_unit: 1
 ```
 
-The script will:
-- Check for existing resource groups
-- Check for existing Virtual WAN resources
-- Check for existing Virtual Hubs
-- Import any found resources into Terraform state
+### Modifying Existing Hubs
 
-### Ongoing Management
+1. Edit the appropriate environment config file
+2. Modify the hub configuration under the `hubs` section
+3. Commit and push changes
 
-1. **Adding a new hub**:
-   - Create a new YAML file in `terraform/config/hubs/`
-   - Follow the configuration structure
-   - Push to main branch
-   - Only the new hub will be deployed
+### Disabling Hubs
 
-2. **Modifying existing hubs**:
-   - Edit the corresponding YAML file
-   - Push to main branch
-   - Only the modified hub will be updated
+1. Edit the appropriate environment config file
+2. Set `enabled: false` for the hub you want to disable
+3. Commit and push changes
 
-3. **Removing a hub**:
-   - Delete the corresponding YAML file
-   - Push to main branch
-   - The hub will be destroyed
+### Updating Firewall Rules
 
-## Workflow Details
+1. Edit the appropriate environment config file
+2. Modify the `firewall_rules` section
+3. Commit and push changes
 
-### Virtual WAN Core Workflow
-- **Trigger**: Manual (workflow_dispatch)
-- **Purpose**: Create Virtual WAN infrastructure
-- **State**: `prod/vwan-core.tfstate`
-- **Frequency**: Run once per environment
+## Importing Existing Resources
 
-### Virtual WAN Hubs Workflow
-- **Trigger**: Automatic on push to main
-- **Purpose**: Deploy individual hubs
-- **State**: Separate state files per hub (`prod/hub1.tfstate`, etc.)
-- **Intelligence**: Only processes changed hub configurations
+If you have existing Azure resources that need to be imported into Terraform state:
 
-## Benefits
+```bash
+# Import resources for production environment
+./scripts/import-existing-resources.sh prod <subscription_id>
 
-- ✅ **Virtual WAN created once**: No duplicate Virtual WAN resources
-- ✅ **Individual hub management**: Each hub is managed independently
-- ✅ **Targeted deployments**: Only process changed hub configurations
-- ✅ **Separate state files**: Each hub has its own state for isolation
-- ✅ **Clear separation**: Core infrastructure vs. hub infrastructure
-- ✅ **Faster deployments**: Only update what changed
-- ✅ **Reduced risk**: Changes to one hub don't affect others
+# Import resources for development environment
+./scripts/import-existing-resources.sh dev <subscription_id>
+```
 
-## Customization
+## Destroying Infrastructure
 
-You can customize the deployment by modifying the hub configuration files:
+To destroy infrastructure for a specific environment:
 
-1. **Adding a new hub**:
-   - Create a new YAML file in `terraform/config/hubs/`
-   - Follow the configuration structure
-   - The hub will be automatically included in the deployment
+1. Go to the **Actions** tab in GitHub
+2. Select **Terraform Virtual WAN Destroy**
+3. Click **Run workflow**
+4. Choose the environment to destroy
+5. Click **Run workflow**
 
-2. **Modifying existing hubs**:
-   - Edit the corresponding YAML file
-   - Update settings as needed
-   - Changes will be applied on next deployment
+**Warning**: This will permanently delete all resources in the specified environment.
 
-3. **Removing a hub**:
-   - Delete the corresponding YAML file
-   - The hub will be removed on next deployment
+## Troubleshooting
 
-4. **Environment-specific settings**:
-   - Use ${environment} variable in names
-   - Configure different settings per environment
+### Common Issues
 
-## Destroy Infrastructure
+1. **State Lock Issues**: The workflows include blob lease breaking to handle state locks
+2. **Resource Import Failures**: Check that resources exist and names match exactly
+3. **Config File Errors**: Validate YAML syntax in config files
 
-To destroy the infrastructure, use the destroy workflow:
+### Debugging
 
-1. Go to Actions → "Terraform Virtual WAN Destroy"
-2. Click "Run workflow"
-3. Select the environment to destroy
-4. Click "Run workflow"
-
-**Warning**: This will destroy all Virtual WAN infrastructure for the selected environment.
+- Check GitHub Actions logs for detailed error messages
+- Verify Azure permissions for the service principal
+- Ensure config files are properly formatted
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
+1. Create a feature branch
+2. Make your changes
+3. Test with a pull request (runs plan automatically)
+4. Merge to main (applies changes automatically)
 
 ## License
 
-MIT 
+This project is licensed under the MIT License. 

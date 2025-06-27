@@ -11,7 +11,7 @@ on:
         options:
           - prod
           - dev
-          - test
+          - staging
 
 permissions:
   id-token: write
@@ -32,7 +32,6 @@ jobs:
       TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
       TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
       TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      TF_VAR_environment: ${{ github.event.inputs.environment }}
 
     defaults:
       run:
@@ -54,58 +53,199 @@ jobs:
       with:
         terraform_version: "1.12.2"
 
-    - name: Get Hub List
+    - name: Get Enabled Hubs from Config
       id: hubs
       run: |
-        # Get list of hub config files
-        HUB_FILES=$(ls config/hubs/*.yaml)
-        HUB_NAMES=""
-        for file in $HUB_FILES; do
-          HUB_NAME=$(basename "$file" .yaml)
-          HUB_NAMES="$HUB_NAMES $HUB_NAME"
-        done
-        echo "hub_names=$HUB_NAMES" >> $GITHUB_OUTPUT
-
-    - name: Terraform Destroy
-      run: |
-        # Process each hub in reverse order (destroy dependencies first)
-        for hub in ${{ steps.hubs.outputs.hub_names }}; do
-          echo "Destroying hub: $hub"
+        ENVIRONMENT="${{ github.event.inputs.environment }}"
+        
+        # Check if config file exists for this environment
+        if [ ! -f "config/$ENVIRONMENT/config.yml" ]; then
+          echo "Config file not found for environment: $ENVIRONMENT"
+          echo "hub_names=" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        # Parse config to get enabled hubs
+        python3 -c |
+          import yaml
+          import sys
           
-          # Create backend.tf file for each hub
-          cat > backend.tf << 'EOF'
+          try:
+              with open('config/$ENVIRONMENT/config.yml', 'r') as f:
+                  config = yaml.safe_load(f)
+              
+              hubs = config.get('hubs', {})
+              enabled_hubs = []
+              
+              for hub_name, hub_config in hubs.items():
+                  if hub_config.get('enabled', False):
+                      enabled_hubs.append(hub_name)
+              
+              print(' '.join(enabled_hubs))
+              
+          except Exception as e:
+              print(f'Error processing config for $ENVIRONMENT: {e}')
+              sys.exit(1)
+        > enabled_hubs_${ENVIRONMENT}.txt
+        
+        ENABLED_HUBS=$(cat enabled_hubs_${ENVIRONMENT}.txt)
+        echo "hub_names=$ENABLED_HUBS" >> $GITHUB_OUTPUT
+        echo "Enabled hubs for environment $ENVIRONMENT: $ENABLED_HUBS"
+
+    - name: Terraform Destroy Hubs
+      run: |
+        ENVIRONMENT="${{ github.event.inputs.environment }}"
+        
+        # Process each enabled hub in reverse order (destroy dependencies first)
+        for hub in ${{ steps.hubs.outputs.hub_names }}; do
+          echo "Destroying hub: $hub for environment: $ENVIRONMENT"
+          
+          # Create environment-specific directory
+          mkdir -p hub-${ENVIRONMENT}-${hub}
+          cp variables.tf hub-${ENVIRONMENT}-${hub}/
+          cp main-hubs.tf hub-${ENVIRONMENT}-${hub}/main.tf
+          
+          # Create backend.tf file for this hub
+          cat > hub-${ENVIRONMENT}-${hub}/backend.tf << EOF
         terraform {
           backend "azurerm" {
             resource_group_name  = "rg-tf-state"
-            storage_account_name = "STORAGE_ACCOUNT_PLACEHOLDER"
+            storage_account_name = "sttfstatecencoraprod"
             container_name       = "tfstate"
-            key                  = "HUB_NAME_PLACEHOLDER"
+            key                  = "${ENVIRONMENT}/${hub}.tfstate"
             use_oidc             = true
           }
         }
         EOF
           
-          # Replace placeholders with actual values
-          sed -i "s/STORAGE_ACCOUNT_PLACEHOLDER/sttfstatecencoraprod/g" backend.tf
-          sed -i "s/HUB_NAME_PLACEHOLDER/${{ github.event.inputs.environment }}\/${hub}.tfstate/g" backend.tf
+          # Generate terraform.tfvars from config.yml
+          python3 -c |
+            import yaml
+            import sys
+            
+            try:
+                with open('config/$ENVIRONMENT/config.yml', 'r') as f:
+                    config = yaml.safe_load(f)
+                
+                tfvars = f'''client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"
+            tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"
+            subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"
+            environment = \"{config.get('environment', '$ENVIRONMENT')}\"
+            hub_name = \"{hub}\"
+            location = \"{config.get('region', 'eastus')}\"
+            '''
+                
+                with open('hub-$ENVIRONMENT-$hub/terraform.tfvars', 'w') as f:
+                    f.write(tfvars)
+                    
+            except Exception as e:
+                print(f'Error processing config for $ENVIRONMENT hub $hub: {e}')
+                sys.exit(1)
           
-          echo "Backend configuration created for hub: $hub"
-          cat backend.tf
-          
-          terraform init
+          # Run terraform in the hub directory
+          cd hub-${ENVIRONMENT}-${hub}
+          terraform init -reconfigure
           
           # Break any existing blob leases
           echo "Breaking any existing blob leases..."
-          az storage blob lease break --container-name tfstate --blob-name "${{ github.event.inputs.environment }}/${hub}.tfstate" --account-name sttfstatecencoraprod 2>/dev/null || echo "No existing lease to break or blob doesn't exist"
+          az storage blob lease break --container-name tfstate --blob-name "${ENVIRONMENT}/${hub}.tfstate" --account-name sttfstatecencoraprod 2>/dev/null || echo "No existing lease to break or blob doesn't exist"
           
-          echo "Destroying infrastructure for hub: $hub"
-          
-          # Create terraform.tfvars file
-          echo "client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"" > terraform.tfvars
-          echo "tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"" >> terraform.tfvars
-          echo "subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"" >> terraform.tfvars
-          echo "environment = \"${{ github.event.inputs.environment }}\"" >> terraform.tfvars
-          echo "hub_name = \"${hub}\"" >> terraform.tfvars
-          
+          echo "Destroying infrastructure for hub: $hub in environment: $ENVIRONMENT"
           terraform destroy -auto-approve -var-file="terraform.tfvars" -input=false -lock=false -timeout=30m
-        done 
+          cd ..
+        done
+
+    - name: Destroy VWAN Core (Optional)
+      run: |
+        ENVIRONMENT="${{ github.event.inputs.environment }}"
+        
+        # Check if VWAN core should be destroyed
+        if [ ! -f "config/$ENVIRONMENT/config.yml" ]; then
+          echo "Config file not found for environment: $ENVIRONMENT, skipping VWAN core destruction"
+          exit 0
+        fi
+        
+        # Parse config to check if VWAN core is enabled
+        python3 -c |
+          import yaml
+          import sys
+          
+          try:
+              with open('config/$ENVIRONMENT/config.yml', 'r') as f:
+                  config = yaml.safe_load(f)
+              
+              vwan_core = config.get('vwan_core', {})
+              if vwan_core.get('enabled', False):
+                  print('enabled')
+              else:
+                  print('disabled')
+                  
+          except Exception as e:
+              print(f'Error processing config for $ENVIRONMENT: {e}')
+              sys.exit(1)
+        > vwan_core_status_${ENVIRONMENT}.txt
+        
+        VWAN_CORE_STATUS=$(cat vwan_core_status_${ENVIRONMENT}.txt)
+        
+        if [ "$VWAN_CORE_STATUS" != "enabled" ]; then
+          echo "VWAN core is disabled for environment: $ENVIRONMENT, skipping destruction"
+          exit 0
+        fi
+        
+        echo "Destroying VWAN core for environment: $ENVIRONMENT"
+        
+        # Create environment-specific directory
+        mkdir -p vwan-core-${ENVIRONMENT}
+        cp main-vwan-core.tf vwan-core-${ENVIRONMENT}/main.tf
+        cp variables.tf vwan-core-${ENVIRONMENT}/
+        
+        # Create backend configuration for this environment
+        cat > vwan-core-${ENVIRONMENT}/backend.tf << EOF
+        terraform {
+          backend "azurerm" {
+            resource_group_name  = "rg-tf-state"
+            storage_account_name = "sttfstatecencoraprod"
+            container_name       = "tfstate"
+            key                  = "vwan-core-${ENVIRONMENT}.tfstate"
+            use_oidc             = true
+          }
+        }
+        EOF
+        
+        # Generate terraform.tfvars from config.yml
+        python3 -c |
+          import yaml
+          import sys
+          
+          try:
+              with open('config/$ENVIRONMENT/config.yml', 'r') as f:
+                  config = yaml.safe_load(f)
+              
+              vwan_core = config.get('vwan_core', {})
+              firewall = vwan_core.get('firewall', {})
+              
+              tfvars = f'''client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"
+          tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"
+          subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"
+          environment = \"{config.get('environment', '$ENVIRONMENT')}\"
+          location = \"{config.get('region', 'eastus')}\"
+          '''
+              
+              with open('vwan-core-$ENVIRONMENT/terraform.tfvars', 'w') as f:
+                  f.write(tfvars)
+                  
+          except Exception as e:
+              print(f'Error processing config for $ENVIRONMENT: {e}')
+              sys.exit(1)
+        
+        # Run terraform in the environment directory
+        cd vwan-core-${ENVIRONMENT}
+        terraform init -reconfigure
+        
+        # Break any existing blob leases
+        echo "Breaking any existing blob leases..."
+        az storage blob lease break --container-name tfstate --blob-name "vwan-core-${ENVIRONMENT}.tfstate" --account-name sttfstatecencoraprod 2>/dev/null || echo "No existing lease to break or blob doesn't exist"
+        
+        echo "Destroying VWAN core infrastructure for environment: ${ENVIRONMENT}..."
+        terraform destroy -auto-approve -var-file="terraform.tfvars" -input=false -lock=false -timeout=30m
+        cd .. 
