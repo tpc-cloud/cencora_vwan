@@ -1,4 +1,4 @@
-name: 'Terraform Virtual WAN Core'
+name: 'Deploy Virtual WAN Core'
 
 on:
   pull_request:
@@ -139,7 +139,7 @@ jobs:
       id: storage
       run: |
         # Set variables
-        RESOURCE_GROUP="rg-tf-state"
+        RESOURCE_GROUP="rg-vwan-terraform-state"
         STORAGE_ACCOUNT="sttfstatecencoraprod"
         CONTAINER_NAME="tfstate"
         LOCATION="eastus"
@@ -221,6 +221,14 @@ jobs:
             continue
           fi
           
+          # Check if resource group exists
+          RESOURCE_GROUP="rg-vwan-${env}"
+          if ! az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+            echo "Resource group '$RESOURCE_GROUP' does not exist. Please create it using:"
+            echo "  ./scripts/manage-resource-groups.sh create $env"
+            continue
+          fi
+          
           # Create environment-specific directory
           mkdir -p vwan-core-${env}
           cp main-vwan-core.tf vwan-core-${env}/main.tf
@@ -230,7 +238,7 @@ jobs:
           cat > vwan-core-${env}/backend.tf << EOF
         terraform {
           backend "azurerm" {
-            resource_group_name  = "rg-tf-state"
+            resource_group_name  = "rg-vwan-terraform-state"
             storage_account_name = "${{ steps.storage.outputs.storage_account }}"
             container_name       = "tfstate"
             key                  = "vwan-core-${env}.tfstate"
@@ -264,7 +272,6 @@ jobs:
             except Exception as e:
                 print(f'Error processing config for $env: {e}')
                 sys.exit(1)
-          > vwan_core_${env}/terraform.tfvars
           
           # Run terraform plan
           cd vwan-core-${env}
@@ -283,18 +290,17 @@ jobs:
         echo "$PLAN_OUTPUT" >> $GITHUB_OUTPUT
         echo "EOF" >> $GITHUB_OUTPUT
 
-    - name: Comment Plan Output
+    - name: Comment Plan Results
       if: github.event_name == 'pull_request'
       uses: actions/github-script@v7
       with:
         script: |
-          const output = `## VWAN Core Terraform Plan Results
+          const output = `## VWAN Core Infrastructure Plan Results
           
           **Component:** Virtual WAN Core Infrastructure
           **PR:** #${context.payload.pull_request.number}
           **Branch:** ${context.payload.pull_request.head.ref}
           **Commit:** ${context.sha}
-          **Environments:** ${process.env.CHANGED_ENVIRONMENTS}
           
           \`\`\`
           ${process.env.PLAN_OUTPUT}
@@ -307,14 +313,13 @@ jobs:
             repo: context.repo.repo,
             body: output
           });
-        env:
-          PLAN_OUTPUT: ${{ steps.plan.outputs.plan_output }}
-          CHANGED_ENVIRONMENTS: ${{ needs.inspect-config.outputs.environments_changed }}
+      env:
+        PLAN_OUTPUT: ${{ steps.plan.outputs.plan_output }}
 
   terraform-apply:
     name: 'Terraform Apply VWAN Core'
     needs: [inspect-config, terraform-plan]
-    if: (needs.inspect-config.outputs.vwan_core_changed == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main') || needs.inspect-config.outputs.manual_trigger == 'true'
+    if: (needs.inspect-config.outputs.vwan_core_changed == 'true' && github.event_name == 'push') || needs.inspect-config.outputs.manual_trigger == 'true'
     runs-on: ubuntu-latest
     environment: production
 
@@ -347,7 +352,7 @@ jobs:
       id: storage
       run: |
         # Set variables
-        RESOURCE_GROUP="rg-tf-state"
+        RESOURCE_GROUP="rg-vwan-terraform-state"
         STORAGE_ACCOUNT="sttfstatecencoraprod"
         CONTAINER_NAME="tfstate"
         LOCATION="eastus"
@@ -379,7 +384,7 @@ jobs:
         # Save storage account name for later steps
         echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
 
-    - name: Terraform Apply VWAN Core
+    - name: Run Terraform Apply
       run: |
         # Determine which environments to process
         if [ "${{ needs.inspect-config.outputs.manual_trigger }}" = "true" ]; then
@@ -426,6 +431,14 @@ jobs:
             continue
           fi
           
+          # Check if resource group exists
+          RESOURCE_GROUP="rg-vwan-${env}"
+          if ! az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+            echo "Resource group '$RESOURCE_GROUP' does not exist. Please create it using:"
+            echo "  ./scripts/manage-resource-groups.sh create $env"
+            continue
+          fi
+          
           # Create environment-specific directory
           mkdir -p vwan-core-${env}
           cp main-vwan-core.tf vwan-core-${env}/main.tf
@@ -435,7 +448,7 @@ jobs:
           cat > vwan-core-${env}/backend.tf << EOF
         terraform {
           backend "azurerm" {
-            resource_group_name  = "rg-tf-state"
+            resource_group_name  = "rg-vwan-terraform-state"
             storage_account_name = "${{ steps.storage.outputs.storage_account }}"
             container_name       = "tfstate"
             key                  = "vwan-core-${env}.tfstate"
@@ -469,71 +482,11 @@ jobs:
             except Exception as e:
                 print(f'Error processing config for $env: {e}')
                 sys.exit(1)
-          > vwan_core_${env}/terraform.tfvars
           
-          # Run terraform in the environment directory
+          # Run terraform apply
           cd vwan-core-${env}
           terraform init -reconfigure
+          terraform apply -auto-approve -var-file="terraform.tfvars" -input=false
           
-          # Break any existing blob leases
-          echo "Breaking any existing blob leases..."
-          az storage blob lease break --container-name tfstate --blob-name "vwan-core-${env}.tfstate" --account-name ${{ steps.storage.outputs.storage_account }} 2>/dev/null || echo "No existing lease to break or blob doesn't exist"
-          
-          # Check if resource group exists and import it if needed
-          echo "Checking if resource group rg-vwan-${env} exists..."
-          if az group show --name "rg-vwan-${env}" >/dev/null 2>&1; then
-            echo "Resource group exists, importing into Terraform state..."
-            terraform import azurerm_resource_group.vwan "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-${env}" || echo "Import failed or resource already in state"
-          else
-            echo "Resource group does not exist, will be created by Terraform"
-          fi
-          
-          # Check if Virtual WAN exists and import it if needed
-          echo "Checking if Virtual WAN vwan-${env} exists..."
-          if az network vwan show --name "vwan-${env}" --resource-group "rg-vwan-${env}" >/dev/null 2>&1; then
-            echo "Virtual WAN exists, importing into Terraform state..."
-            terraform import azurerm_virtual_wan.vwan "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-${env}/providers/Microsoft.Network/virtualWans/vwan-${env}" || echo "Import failed or resource already in state"
-          else
-            echo "Virtual WAN does not exist, will be created by Terraform"
-          fi
-          
-          # Check if Virtual Network exists and import it if needed
-          echo "Checking if Virtual Network vnet-fw-${env} exists..."
-          if az network vnet show --name "vnet-fw-${env}" --resource-group "rg-vwan-${env}" >/dev/null 2>&1; then
-            echo "Virtual Network exists, importing into Terraform state..."
-            terraform import azurerm_virtual_network.firewall "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-${env}/providers/Microsoft.Network/virtualNetworks/vnet-fw-${env}" || echo "Import failed or resource already in state"
-          else
-            echo "Virtual Network does not exist, will be created by Terraform"
-          fi
-          
-          # Check if Firewall Policy exists and import it if needed
-          echo "Checking if Firewall Policy fw-policy-${env} exists..."
-          if az network firewall policy show --name "fw-policy-${env}" --resource-group "rg-vwan-${env}" >/dev/null 2>&1; then
-            echo "Firewall Policy exists, importing into Terraform state..."
-            terraform import azurerm_firewall_policy.vwan "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-${env}/providers/Microsoft.Network/firewallPolicies/fw-policy-${env}" || echo "Import failed or resource already in state"
-          else
-            echo "Firewall Policy does not exist, will be created by Terraform"
-          fi
-          
-          # Check if Public IP exists and import it if needed
-          echo "Checking if Public IP pip-fw-${env} exists..."
-          if az network public-ip show --name "pip-fw-${env}" --resource-group "rg-vwan-${env}" >/dev/null 2>&1; then
-            echo "Public IP exists, importing into Terraform state..."
-            terraform import azurerm_public_ip.firewall "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-${env}/providers/Microsoft.Network/publicIPAddresses/pip-fw-${env}" || echo "Import failed or resource already in state"
-          else
-            echo "Public IP does not exist, will be created by Terraform"
-          fi
-          
-          # Check if Azure Firewall exists and import it if needed
-          echo "Checking if Azure Firewall fw-${env} exists..."
-          if az network firewall show --name "fw-${env}" --resource-group "rg-vwan-${env}" >/dev/null 2>&1; then
-            echo "Azure Firewall exists, importing into Terraform state..."
-            terraform import azurerm_firewall.vwan "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-vwan-${env}/providers/Microsoft.Network/azureFirewalls/fw-${env}" || echo "Import failed or resource already in state"
-          else
-            echo "Azure Firewall does not exist, will be created by Terraform"
-          fi
-          
-          echo "Creating Virtual WAN core infrastructure for environment: ${env}..."
-          terraform apply -auto-approve -var-file="terraform.tfvars" -input=false -lock=false
           cd ..
         done 

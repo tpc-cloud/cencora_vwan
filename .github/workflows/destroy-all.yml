@@ -1,0 +1,720 @@
+name: 'Destroy All Resources (Testing)'
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to destroy'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      confirm_destroy:
+        description: 'Type "DESTROY" to confirm destruction of all resources'
+        required: true
+        type: string
+        pattern: '^DESTROY$'
+      destroy_vwan_core:
+        description: 'Destroy VWAN Core resources'
+        required: false
+        type: boolean
+        default: true
+      destroy_hubs:
+        description: 'Destroy Hub resources'
+        required: false
+        type: boolean
+        default: true
+      destroy_spoke_vnets:
+        description: 'Destroy Spoke VNet resources'
+        required: false
+        type: boolean
+        default: true
+      destroy_firewall:
+        description: 'Destroy Firewall resources'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  ARM_CLIENT_ID: "${{ secrets.AZURE_CLIENT_ID }}"
+  ARM_SUBSCRIPTION_ID: "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+  ARM_TENANT_ID: "${{ secrets.AZURE_TENANT_ID }}"
+
+jobs:
+  validate-destroy:
+    name: 'Validate Destroy Request'
+    runs-on: ubuntu-latest
+    outputs:
+      should_destroy: ${{ steps.validate.outputs.should_destroy }}
+      environment: ${{ steps.validate.outputs.environment }}
+    steps:
+      - name: Validate Destroy Confirmation
+        id: validate
+        run: |
+          if [ "${{ inputs.confirm_destroy }}" != "DESTROY" ]; then
+            echo "❌ Destroy confirmation failed. You must type 'DESTROY' to proceed."
+            echo "should_destroy=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          if [ "${{ inputs.environment }}" = "prod" ]; then
+            echo "⚠️  WARNING: You are attempting to destroy PRODUCTION resources!"
+            echo "This action will permanently delete all production infrastructure."
+            echo "Please ensure this is intentional and you have proper backups."
+          fi
+          
+          echo "✅ Destroy validation passed for environment: ${{ inputs.environment }}"
+          echo "should_destroy=true" >> $GITHUB_OUTPUT
+          echo "environment=${{ inputs.environment }}" >> $GITHUB_OUTPUT
+
+  destroy-spoke-vnets:
+    name: 'Destroy Spoke VNets'
+    needs: validate-destroy
+    if: needs.validate-destroy.outputs.should_destroy == 'true' && inputs.destroy_spoke_vnets == true
+    runs-on: ubuntu-latest
+    environment: production
+    
+    env:
+      TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    defaults:
+      run:
+        working-directory: ./terraform
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.2"
+
+      - name: Setup Backend Storage
+        id: storage
+        run: |
+          RESOURCE_GROUP="rg-vwan-terraform-state"
+          STORAGE_ACCOUNT="sttfstatecencoraprod"
+          CONTAINER_NAME="tfstate"
+          LOCATION="eastus"
+
+          # Check if storage account exists
+          if ! az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
+            echo "Storage account $STORAGE_ACCOUNT does not exist. Nothing to destroy."
+            exit 0
+          fi
+
+          echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
+
+      - name: Destroy Spoke VNets
+        run: |
+          ENVIRONMENT="${{ needs.validate-destroy.outputs.environment }}"
+          
+          echo "🗑️  Destroying spoke VNets for environment: $ENVIRONMENT"
+          
+          # Check if config file exists for this environment
+          if [ ! -f "config/$ENVIRONMENT/config.yml" ]; then
+            echo "Config file not found for environment: $ENVIRONMENT, skipping"
+            exit 0
+          fi
+          
+          # Check if resource group exists
+          RESOURCE_GROUP="rg-vwan-${ENVIRONMENT}"
+          if ! az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+            echo "Resource group '$RESOURCE_GROUP' does not exist. Nothing to destroy."
+            exit 0
+          fi
+          
+          # Parse config to get enabled spoke VNets
+          python3 -c |
+            import yaml
+            import sys
+            
+            try:
+                with open('config/$ENVIRONMENT/config.yml', 'r') as f:
+                    config = yaml.safe_load(f)
+                
+                spoke_vnets = config.get('spoke_vnets', {})
+                enabled_vnets = []
+                
+                for vnet_name, vnet_config in spoke_vnets.items():
+                    if vnet_config.get('enabled', False):
+                        enabled_vnets.append(vnet_name)
+                
+                print(' '.join(enabled_vnets))
+                
+            except Exception as e:
+                print(f'Error processing config for $ENVIRONMENT: {e}')
+                sys.exit(1)
+          > enabled_vnets_${ENVIRONMENT}.txt
+          
+          ENABLED_VNETS=$(cat enabled_vnets_${ENVIRONMENT}.txt)
+          
+          if [ -z "$ENABLED_VNETS" ]; then
+            echo "No enabled spoke VNets found for environment: $ENVIRONMENT"
+            exit 0
+          fi
+          
+          # Create environment-specific directory
+          mkdir -p spoke-vnets-${ENVIRONMENT}
+          cp main-spoke-vnets.tf spoke-vnets-${ENVIRONMENT}/main.tf
+          cp variables.tf spoke-vnets-${ENVIRONMENT}/
+          
+          # Create backend configuration
+          cat > spoke-vnets-${ENVIRONMENT}/backend.tf << EOF
+        terraform {
+          backend "azurerm" {
+            resource_group_name  = "rg-vwan-terraform-state"
+            storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+            container_name       = "tfstate"
+            key                  = "spoke-vnets-${ENVIRONMENT}.tfstate"
+            use_oidc             = true
+          }
+        }
+        EOF
+          
+          # Generate terraform.tfvars from config.yml
+          python3 -c |
+            import yaml
+            import sys
+            
+            try:
+                with open('config/$ENVIRONMENT/config.yml', 'r') as f:
+                    config = yaml.safe_load(f)
+                
+                tfvars = f'''client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"
+            tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"
+            subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"
+            environment = \"{config.get('environment', '$ENVIRONMENT')}\"
+            location = \"{config.get('region', 'eastus')}\"
+            '''
+                
+                with open('spoke-vnets-$ENVIRONMENT/terraform.tfvars', 'w') as f:
+                    f.write(tfvars)
+                    
+            except Exception as e:
+                print(f'Error processing config for $ENVIRONMENT: {e}')
+                sys.exit(1)
+          
+          # Run terraform destroy
+          cd spoke-vnets-${ENVIRONMENT}
+          terraform init -reconfigure
+          terraform destroy -auto-approve -var-file="terraform.tfvars" -input=false
+          
+          cd ..
+
+  destroy-hubs:
+    name: 'Destroy Virtual Hubs'
+    needs: validate-destroy
+    if: needs.validate-destroy.outputs.should_destroy == 'true' && inputs.destroy_hubs == true
+    runs-on: ubuntu-latest
+    environment: production
+    
+    env:
+      TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    defaults:
+      run:
+        working-directory: ./terraform
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.2"
+
+      - name: Setup Backend Storage
+        id: storage
+        run: |
+          RESOURCE_GROUP="rg-vwan-terraform-state"
+          STORAGE_ACCOUNT="sttfstatecencoraprod"
+          CONTAINER_NAME="tfstate"
+          LOCATION="eastus"
+
+          # Check if storage account exists
+          if ! az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
+            echo "Storage account $STORAGE_ACCOUNT does not exist. Nothing to destroy."
+            exit 0
+          fi
+
+          echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
+
+      - name: Destroy Virtual Hubs
+        run: |
+          ENVIRONMENT="${{ needs.validate-destroy.outputs.environment }}"
+          
+          echo "🗑️  Destroying virtual hubs for environment: $ENVIRONMENT"
+          
+          # Check if config file exists for this environment
+          if [ ! -f "config/$ENVIRONMENT/config.yml" ]; then
+            echo "Config file not found for environment: $ENVIRONMENT, skipping"
+            exit 0
+          fi
+          
+          # Check if resource group exists
+          RESOURCE_GROUP="rg-vwan-${ENVIRONMENT}"
+          if ! az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+            echo "Resource group '$RESOURCE_GROUP' does not exist. Nothing to destroy."
+            exit 0
+          fi
+          
+          # Parse config to get enabled hubs
+          python3 -c |
+            import yaml
+            import sys
+            
+            try:
+                with open('config/$ENVIRONMENT/config.yml', 'r') as f:
+                    config = yaml.safe_load(f)
+                
+                hubs = config.get('hubs', {})
+                enabled_hubs = []
+                
+                for hub_name, hub_config in hubs.items():
+                    if hub_config.get('enabled', False):
+                        enabled_hubs.append(hub_name)
+                
+                print(' '.join(enabled_hubs))
+                
+            except Exception as e:
+                print(f'Error processing config for $ENVIRONMENT: {e}')
+                sys.exit(1)
+          > enabled_hubs_${ENVIRONMENT}.txt
+          
+          ENABLED_HUBS=$(cat enabled_hubs_${ENVIRONMENT}.txt)
+          
+          if [ -z "$ENABLED_HUBS" ]; then
+            echo "No enabled hubs found for environment: $ENVIRONMENT"
+            exit 0
+          fi
+          
+          # Process each enabled hub
+          for hub in $ENABLED_HUBS; do
+            echo "🗑️  Destroying hub: $hub for environment: $ENVIRONMENT"
+            
+            # Create a clean directory for this hub
+            mkdir -p hub-${ENVIRONMENT}-${hub}
+            cp variables.tf hub-${ENVIRONMENT}-${hub}/
+            cp main-hubs.tf hub-${ENVIRONMENT}-${hub}/main.tf
+            
+            # Create backend.tf file for this hub
+            cat > hub-${ENVIRONMENT}-${hub}/backend.tf << EOF
+          terraform {
+            backend "azurerm" {
+              resource_group_name  = "rg-vwan-terraform-state"
+              storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+              container_name       = "tfstate"
+              key                  = "${ENVIRONMENT}/${hub}.tfstate"
+              use_oidc             = true
+            }
+          }
+          EOF
+            
+            # Generate terraform.tfvars from config.yml
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$ENVIRONMENT/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  tfvars = f'''client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"
+              tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"
+              subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"
+              environment = \"{config.get('environment', '$ENVIRONMENT')}\"
+              hub_name = \"{hub}\"
+              location = \"{config.get('region', 'eastus')}\"
+              '''
+                  
+                  with open('hub-$ENVIRONMENT-$hub/terraform.tfvars', 'w') as f:
+                      f.write(tfvars)
+                      
+              except Exception as e:
+                  print(f'Error processing config for $ENVIRONMENT hub $hub: {e}')
+                  sys.exit(1)
+            
+            # Run terraform destroy in the hub directory
+            cd hub-${ENVIRONMENT}-${hub}
+            terraform init -reconfigure
+            terraform destroy -auto-approve -var-file="terraform.tfvars" -input=false
+            
+            cd ..
+          done
+
+  destroy-firewall:
+    name: 'Destroy Firewall'
+    needs: validate-destroy
+    if: needs.validate-destroy.outputs.should_destroy == 'true' && inputs.destroy_firewall == true
+    runs-on: ubuntu-latest
+    environment: production
+    
+    env:
+      TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    defaults:
+      run:
+        working-directory: ./terraform
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.2"
+
+      - name: Setup Backend Storage
+        id: storage
+        run: |
+          RESOURCE_GROUP="rg-vwan-terraform-state"
+          STORAGE_ACCOUNT="sttfstatecencoraprod"
+          CONTAINER_NAME="tfstate"
+          LOCATION="eastus"
+
+          # Check if storage account exists
+          if ! az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
+            echo "Storage account $STORAGE_ACCOUNT does not exist. Nothing to destroy."
+            exit 0
+          fi
+
+          echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
+
+      - name: Destroy Firewall
+        run: |
+          ENVIRONMENT="${{ needs.validate-destroy.outputs.environment }}"
+          
+          echo "🗑️  Destroying firewall for environment: $ENVIRONMENT"
+          
+          # Check if config file exists for this environment
+          if [ ! -f "config/$ENVIRONMENT/config.yml" ]; then
+            echo "Config file not found for environment: $ENVIRONMENT, skipping"
+            exit 0
+          fi
+          
+          # Check if resource group exists
+          RESOURCE_GROUP="rg-vwan-${ENVIRONMENT}"
+          if ! az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+            echo "Resource group '$RESOURCE_GROUP' does not exist. Nothing to destroy."
+            exit 0
+          fi
+          
+          # Parse config to check if firewall is enabled in VWAN core
+          python3 -c |
+            import yaml
+            import sys
+            
+            try:
+                with open('config/$ENVIRONMENT/config.yml', 'r') as f:
+                    config = yaml.safe_load(f)
+                
+                vwan_core = config.get('vwan_core', {})
+                firewall = vwan_core.get('firewall', {})
+                if firewall.get('enabled', False):
+                    print('enabled')
+                else:
+                    print('disabled')
+                    
+            except Exception as e:
+                print(f'Error processing config for $ENVIRONMENT: {e}')
+                sys.exit(1)
+          > firewall_status_${ENVIRONMENT}.txt
+          
+          FIREWALL_STATUS=$(cat firewall_status_${ENVIRONMENT}.txt)
+          
+          if [ "$FIREWALL_STATUS" != "enabled" ]; then
+            echo "Firewall is disabled for environment: $ENVIRONMENT, nothing to destroy"
+            exit 0
+          fi
+          
+          # Create environment-specific directory
+          mkdir -p firewall-${ENVIRONMENT}
+          cp main-vwan-core.tf firewall-${ENVIRONMENT}/main.tf
+          cp variables.tf firewall-${ENVIRONMENT}/
+          
+          # Create backend configuration for this environment
+          cat > firewall-${ENVIRONMENT}/backend.tf << EOF
+        terraform {
+          backend "azurerm" {
+            resource_group_name  = "rg-vwan-terraform-state"
+            storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+            container_name       = "tfstate"
+            key                  = "firewall-${ENVIRONMENT}.tfstate"
+            use_oidc             = true
+          }
+        }
+        EOF
+          
+          # Generate terraform.tfvars from config.yml
+          python3 -c |
+            import yaml
+            import sys
+            
+            try:
+                with open('config/$ENVIRONMENT/config.yml', 'r') as f:
+                    config = yaml.safe_load(f)
+                
+                vwan_core = config.get('vwan_core', {})
+                firewall = vwan_core.get('firewall', {})
+                
+                tfvars = f'''client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"
+            tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"
+            subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"
+            environment = \"{config.get('environment', '$ENVIRONMENT')}\"
+            location = \"{config.get('region', 'eastus')}\"
+            '''
+                
+                with open('firewall-$ENVIRONMENT/terraform.tfvars', 'w') as f:
+                    f.write(tfvars)
+                    
+            except Exception as e:
+                print(f'Error processing config for $ENVIRONMENT: {e}')
+                sys.exit(1)
+          
+          # Run terraform destroy
+          cd firewall-${ENVIRONMENT}
+          terraform init -reconfigure
+          terraform destroy -auto-approve -var-file="terraform.tfvars" -input=false
+          
+          cd ..
+
+  destroy-vwan-core:
+    name: 'Destroy VWAN Core'
+    needs: [validate-destroy, destroy-hubs, destroy-firewall]
+    if: needs.validate-destroy.outputs.should_destroy == 'true' && inputs.destroy_vwan_core == true
+    runs-on: ubuntu-latest
+    environment: production
+    
+    env:
+      TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    defaults:
+      run:
+        working-directory: ./terraform
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.2"
+
+      - name: Setup Backend Storage
+        id: storage
+        run: |
+          RESOURCE_GROUP="rg-vwan-terraform-state"
+          STORAGE_ACCOUNT="sttfstatecencoraprod"
+          CONTAINER_NAME="tfstate"
+          LOCATION="eastus"
+
+          # Check if storage account exists
+          if ! az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
+            echo "Storage account $STORAGE_ACCOUNT does not exist. Nothing to destroy."
+            exit 0
+          fi
+
+          echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
+
+      - name: Destroy VWAN Core
+        run: |
+          ENVIRONMENT="${{ needs.validate-destroy.outputs.environment }}"
+          
+          echo "🗑️  Destroying VWAN core for environment: $ENVIRONMENT"
+          
+          # Check if config file exists for this environment
+          if [ ! -f "config/$ENVIRONMENT/config.yml" ]; then
+            echo "Config file not found for environment: $ENVIRONMENT, skipping"
+            exit 0
+          fi
+          
+          # Check if resource group exists
+          RESOURCE_GROUP="rg-vwan-${ENVIRONMENT}"
+          if ! az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+            echo "Resource group '$RESOURCE_GROUP' does not exist. Nothing to destroy."
+            exit 0
+          fi
+          
+          # Parse config to check if VWAN core is enabled
+          python3 -c |
+            import yaml
+            import sys
+            
+            try:
+                with open('config/$ENVIRONMENT/config.yml', 'r') as f:
+                    config = yaml.safe_load(f)
+                
+                vwan_core = config.get('vwan_core', {})
+                if vwan_core.get('enabled', False):
+                    print('enabled')
+                else:
+                    print('disabled')
+                    
+            except Exception as e:
+                print(f'Error processing config for $ENVIRONMENT: {e}')
+                sys.exit(1)
+          > vwan_core_status_${ENVIRONMENT}.txt
+          
+          VWAN_CORE_STATUS=$(cat vwan_core_status_${ENVIRONMENT}.txt)
+          
+          if [ "$VWAN_CORE_STATUS" != "enabled" ]; then
+            echo "VWAN core is disabled for environment: $ENVIRONMENT, nothing to destroy"
+            exit 0
+          fi
+          
+          # Create environment-specific directory
+          mkdir -p vwan-core-${ENVIRONMENT}
+          cp main-vwan-core.tf vwan-core-${ENVIRONMENT}/main.tf
+          cp variables.tf vwan-core-${ENVIRONMENT}/
+          
+          # Create backend configuration for this environment
+          cat > vwan-core-${ENVIRONMENT}/backend.tf << EOF
+        terraform {
+          backend "azurerm" {
+            resource_group_name  = "rg-vwan-terraform-state"
+            storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+            container_name       = "tfstate"
+            key                  = "vwan-core-${ENVIRONMENT}.tfstate"
+            use_oidc             = true
+          }
+        }
+        EOF
+          
+          # Generate terraform.tfvars from config.yml
+          python3 -c |
+            import yaml
+            import sys
+            
+            try:
+                with open('config/$ENVIRONMENT/config.yml', 'r') as f:
+                    config = yaml.safe_load(f)
+                
+                vwan_core = config.get('vwan_core', {})
+                firewall = vwan_core.get('firewall', {})
+                
+                tfvars = f'''client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"
+            tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"
+            subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"
+            environment = \"{config.get('environment', '$ENVIRONMENT')}\"
+            location = \"{config.get('region', 'eastus')}\"
+            '''
+                
+                with open('vwan-core-$ENVIRONMENT/terraform.tfvars', 'w') as f:
+                    f.write(tfvars)
+                    
+            except Exception as e:
+                print(f'Error processing config for $ENVIRONMENT: {e}')
+                sys.exit(1)
+          
+          # Run terraform destroy
+          cd vwan-core-${ENVIRONMENT}
+          terraform init -reconfigure
+          terraform destroy -auto-approve -var-file="terraform.tfvars" -input=false
+          
+          cd ..
+
+  cleanup-resource-group:
+    name: 'Cleanup Resource Group'
+    needs: [validate-destroy, destroy-vwan-core, destroy-spoke-vnets]
+    if: needs.validate-destroy.outputs.should_destroy == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Cleanup Resource Group
+        run: |
+          ENVIRONMENT="${{ needs.validate-destroy.outputs.environment }}"
+          RESOURCE_GROUP="rg-vwan-${ENVIRONMENT}"
+          
+          echo "🧹 Cleaning up resource group: $RESOURCE_GROUP"
+          
+          # Check if resource group exists
+          if ! az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+            echo "Resource group '$RESOURCE_GROUP' does not exist. Nothing to clean up."
+            exit 0
+          fi
+          
+          # List remaining resources in the resource group
+          echo "📋 Remaining resources in $RESOURCE_GROUP:"
+          az resource list --resource-group "$RESOURCE_GROUP" --output table || echo "No resources found or error listing resources"
+          
+          # Delete the resource group (this will delete any remaining resources)
+          echo "🗑️  Deleting resource group: $RESOURCE_GROUP"
+          az group delete --name "$RESOURCE_GROUP" --yes --no-wait
+          
+          echo "✅ Resource group deletion initiated for: $RESOURCE_GROUP"
+
+  destroy-complete:
+    name: 'Destroy Complete'
+    needs: [validate-destroy, cleanup-resource-group]
+    if: needs.validate-destroy.outputs.should_destroy == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Destroy Complete Notification
+        run: |
+          ENVIRONMENT="${{ needs.validate-destroy.outputs.environment }}"
+          echo "🎉 Destroy operation completed for environment: $ENVIRONMENT"
+          echo ""
+          echo "✅ The following resources have been destroyed:"
+          echo "   - VWAN Core: ${{ inputs.destroy_vwan_core }}"
+          echo "   - Virtual Hubs: ${{ inputs.destroy_hubs }}"
+          echo "   - Spoke VNets: ${{ inputs.destroy_spoke_vnets }}"
+          echo "   - Firewall: ${{ inputs.destroy_firewall }}"
+          echo "   - Resource Group: $ENVIRONMENT"
+          echo ""
+          echo "⚠️  Please note:"
+          echo "   - All data has been permanently deleted"
+          echo "   - This action cannot be undone"
+          echo "   - You may need to recreate resources if needed" 

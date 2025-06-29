@@ -29,6 +29,7 @@ jobs:
     outputs:
       vwan_core_changed: ${{ steps.check-diff.outputs.vwan_core_changed }}
       hubs_changed: ${{ steps.check-diff.outputs.hubs_changed }}
+      firewall_changed: ${{ steps.check-diff.outputs.firewall_changed }}
       deployment_changed: ${{ steps.check-diff.outputs.deployment_changed }}
       config_changed: ${{ steps.check-diff.outputs.config_changed }}
       environments_changed: ${{ steps.check-diff.outputs.environments_changed }}
@@ -66,6 +67,13 @@ jobs:
             echo "hubs_changed=false" >> $GITHUB_OUTPUT
           fi
           
+          # Check for firewall changes within vwan_core section
+          if grep -E '^\+[[:space:]]*firewall:' config_diff.txt || grep -E '^-.*firewall:' config_diff.txt; then
+            echo "firewall_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "firewall_changed=false" >> $GITHUB_OUTPUT
+          fi
+          
           if grep -E '^\+[[:space:]]*deployment:' config_diff.txt || grep -E '^-.*deployment:' config_diff.txt; then
             echo "deployment_changed=true" >> $GITHUB_OUTPUT
           else
@@ -90,10 +98,12 @@ jobs:
           echo "Change Analysis Results:"
           echo "  VWAN Core: ${{ steps.check-diff.outputs.vwan_core_changed }}"
           echo "  Hubs: ${{ steps.check-diff.outputs.hubs_changed }}"
+          echo "  Firewall: ${{ steps.check-diff.outputs.firewall_changed }}"
           echo "  Deployment: ${{ steps.check-diff.outputs.deployment_changed }}"
           echo "  Config: ${{ steps.check-diff.outputs.config_changed }}"
           echo "  Environments: ${{ steps.check-diff.outputs.environments_changed }}"
 
+  # Plan VWAN Core Changes for PRs
   plan-vwan-core:
     name: 'Plan VWAN Core Changes'
     needs: analyze-changes
@@ -128,7 +138,7 @@ jobs:
       - name: Setup Backend Storage
         id: storage
         run: |
-          RESOURCE_GROUP="rg-tf-state"
+          RESOURCE_GROUP="rg-vwan-terraform-state"
           STORAGE_ACCOUNT="sttfstatecencoraprod"
           CONTAINER_NAME="tfstate"
           LOCATION="eastus"
@@ -215,7 +225,7 @@ jobs:
             cat > vwan-core-${env}/backend.tf << EOF
           terraform {
             backend "azurerm" {
-              resource_group_name  = "rg-tf-state"
+              resource_group_name  = "rg-vwan-terraform-state"
               storage_account_name = "${{ steps.storage.outputs.storage_account }}"
               container_name       = "tfstate"
               key                  = "vwan-core-${env}.tfstate"
@@ -347,6 +357,7 @@ jobs:
       #     SERVICENOW_USERNAME: ${{ secrets.SERVICENOW_USERNAME }}
       #     SERVICENOW_PASSWORD: ${{ secrets.SERVICENOW_PASSWORD }}
 
+  # Plan Hub Changes for PRs
   plan-hubs:
     name: 'Plan Hub Changes'
     needs: analyze-changes
@@ -381,7 +392,7 @@ jobs:
       - name: Setup Backend Storage
         id: storage
         run: |
-          RESOURCE_GROUP="rg-tf-state"
+          RESOURCE_GROUP="rg-vwan-terraform-state"
           STORAGE_ACCOUNT="sttfstatecencoraprod"
           CONTAINER_NAME="tfstate"
           LOCATION="eastus"
@@ -483,7 +494,7 @@ jobs:
               cat > hub-${env}-${hub}/backend.tf << EOF
             terraform {
               backend "azurerm" {
-                resource_group_name  = "rg-tf-state"
+                resource_group_name  = "rg-vwan-terraform-state"
                 storage_account_name = "${{ steps.storage.outputs.storage_account }}"
                 container_name       = "tfstate"
                 key                  = "${env}/${hub}.tfstate"
@@ -589,7 +600,6 @@ jobs:
       #         branch: context.payload.pull_request.head.ref,
       #         commit: context.sha,
       #         environments: process.env.PLANNED_ENVIRONMENTS,
-      #         hubs: process.env.PLANNED_HUBS,
       #         plan_output: process.env.PLAN_OUTPUT,
       #         status: 'plan_completed',
       #         timestamp: new Date().toISOString()
@@ -621,34 +631,804 @@ jobs:
       #     SERVICENOW_USERNAME: ${{ secrets.SERVICENOW_USERNAME }}
       #     SERVICENOW_PASSWORD: ${{ secrets.SERVICENOW_PASSWORD }}
 
+  # Plan Firewall Changes for PRs
+  plan-firewall:
+    name: 'Plan Firewall Changes'
+    needs: analyze-changes
+    if: needs.analyze-changes.outputs.firewall_changed == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    env:
+      TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    defaults:
+      run:
+        working-directory: ./terraform
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.2"
+
+      - name: Setup Backend Storage
+        id: storage
+        run: |
+          RESOURCE_GROUP="rg-vwan-terraform-state"
+          STORAGE_ACCOUNT="sttfstatecencoraprod"
+          CONTAINER_NAME="tfstate"
+          LOCATION="eastus"
+
+          # Check if storage account exists, create if not
+          if ! az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
+            echo "Storage account $STORAGE_ACCOUNT does not exist. Please ensure the resource group exists first."
+            echo "You can create it using: ./scripts/manage-resource-groups.sh create tf-state"
+            exit 1
+          fi
+
+          # Create blob container if it doesn't exist
+          az storage container create \
+              --name $CONTAINER_NAME \
+              --account-name $STORAGE_ACCOUNT
+
+          echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
+
+      - name: Plan Firewall Infrastructure
+        id: plan
+        run: |
+          # Get changed environments
+          CHANGED_ENVS="${{ needs.analyze-changes.outputs.environments_changed }}"
+          PLAN_OUTPUT=""
+          PLANNED_ENVIRONMENTS=""
+          
+          for env in ${CHANGED_ENVS//,/ }; do
+            echo "Planning firewall for environment: $env"
+            
+            # Check if config file exists for this environment
+            if [ ! -f "config/$env/config.yml" ]; then
+              echo "Config file not found for environment: $env, skipping"
+              continue
+            fi
+            
+            # Parse config to check if firewall is enabled in VWAN core
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  vwan_core = config.get('vwan_core', {})
+                  firewall = vwan_core.get('firewall', {})
+                  if firewall.get('enabled', False):
+                      print('enabled')
+                  else:
+                      print('disabled')
+                      
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            > firewall_status_${env}.txt
+            
+            FIREWALL_STATUS=$(cat firewall_status_${env}.txt)
+            
+            if [ "$FIREWALL_STATUS" != "enabled" ]; then
+              echo "Firewall is disabled for environment: $env, skipping"
+              continue
+            fi
+            
+            # Check if resource group exists
+            RESOURCE_GROUP="rg-vwan-${env}"
+            if ! az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+              echo "Resource group '$RESOURCE_GROUP' does not exist. Please create it using:"
+              echo "  ./scripts/manage-resource-groups.sh create $env"
+              continue
+            fi
+            
+            # Add to planned environments list
+            if [ -n "$PLANNED_ENVIRONMENTS" ]; then
+              PLANNED_ENVIRONMENTS="$PLANNED_ENVIRONMENTS, $env"
+            else
+              PLANNED_ENVIRONMENTS="$env"
+            fi
+            
+            # Create environment-specific directory
+            mkdir -p firewall-${env}
+            cp main-vwan-core.tf firewall-${env}/main.tf
+            cp variables.tf firewall-${env}/
+            
+            # Create backend configuration for this environment
+            cat > firewall-${env}/backend.tf << EOF
+          terraform {
+            backend "azurerm" {
+              resource_group_name  = "rg-vwan-terraform-state"
+              storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+              container_name       = "tfstate"
+              key                  = "firewall-${env}.tfstate"
+              use_oidc             = true
+            }
+          }
+          EOF
+            
+            # Generate terraform.tfvars from config.yml
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  vwan_core = config.get('vwan_core', {})
+                  firewall = vwan_core.get('firewall', {})
+                  
+                  tfvars = f'''client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"
+              tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"
+              subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"
+              environment = \"{config.get('environment', '$env')}\"
+              location = \"{config.get('region', 'eastus')}\"
+              '''
+                  
+                  with open('firewall-$env/terraform.tfvars', 'w') as f:
+                      f.write(tfvars)
+                      
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            
+            # Run terraform plan
+            cd firewall-${env}
+            terraform init -reconfigure
+            terraform plan -no-color -var-file="terraform.tfvars" -input=false -detailed-exitcode >> ../plan_output.txt 2>&1 || echo "Plan completed with exit code $?" >> ../plan_output.txt
+            
+            echo "" >> ../plan_output.txt
+            echo "--- Environment: $env ---" >> ../plan_output.txt
+            echo "" >> ../plan_output.txt
+            
+            cd ..
+          done
+          
+          PLAN_OUTPUT=$(cat plan_output.txt)
+          echo "plan_output<<EOF" >> $GITHUB_OUTPUT
+          echo "$PLAN_OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          echo "planned_environments=$PLANNED_ENVIRONMENTS" >> $GITHUB_OUTPUT
+
+      - name: Comment Firewall Plan Results
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `## Firewall Infrastructure Plan Results
+            
+            **Component:** Azure Firewall
+            **PR:** #${context.payload.pull_request.number}
+            **Branch:** ${context.payload.pull_request.head.ref}
+            **Commit:** ${context.sha}
+            **Environments:** ${process.env.PLANNED_ENVIRONMENTS}
+            
+            \`\`\`
+            ${process.env.PLAN_OUTPUT}
+            \`\`\`
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+        env:
+          PLAN_OUTPUT: ${{ steps.plan.outputs.plan_output }}
+          PLANNED_ENVIRONMENTS: ${{ steps.plan.outputs.planned_environments }}
+
+  deploy-firewall:
+    name: 'Deploy Firewall Changes'
+    needs: [analyze-changes, deploy-vwan-core]
+    if: needs.analyze-changes.outputs.firewall_changed == 'true' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    env:
+      TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    defaults:
+      run:
+        working-directory: ./terraform
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.2"
+
+      - name: Setup Backend Storage
+        id: storage
+        run: |
+          RESOURCE_GROUP="rg-vwan-terraform-state"
+          STORAGE_ACCOUNT="sttfstatecencoraprod"
+          CONTAINER_NAME="tfstate"
+          LOCATION="eastus"
+
+          # Check if storage account exists, create if not
+          if ! az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
+            echo "Storage account $STORAGE_ACCOUNT does not exist. Please ensure the resource group exists first."
+            echo "You can create it using: ./scripts/manage-resource-groups.sh create tf-state"
+            exit 1
+          fi
+
+          # Create blob container if it doesn't exist
+          az storage container create \
+              --name $CONTAINER_NAME \
+              --account-name $STORAGE_ACCOUNT
+
+          echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
+
+      - name: Deploy Firewall Infrastructure
+        run: |
+          # Get changed environments
+          CHANGED_ENVS="${{ needs.analyze-changes.outputs.environments_changed }}"
+          
+          for env in ${CHANGED_ENVS//,/ }; do
+            echo "Deploying firewall for environment: $env"
+            
+            # Check if config file exists for this environment
+            if [ ! -f "config/$env/config.yml" ]; then
+              echo "Config file not found for environment: $env, skipping"
+              continue
+            fi
+            
+            # Parse config to check if firewall is enabled in VWAN core
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  vwan_core = config.get('vwan_core', {})
+                  firewall = vwan_core.get('firewall', {})
+                  if firewall.get('enabled', False):
+                      print('enabled')
+                  else:
+                      print('disabled')
+                      
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            > firewall_status_${env}.txt
+            
+            FIREWALL_STATUS=$(cat firewall_status_${env}.txt)
+            
+            if [ "$FIREWALL_STATUS" != "enabled" ]; then
+              echo "Firewall is disabled for environment: $env, skipping"
+              continue
+            fi
+            
+            # Check if resource group exists
+            RESOURCE_GROUP="rg-vwan-${env}"
+            if ! az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+              echo "Resource group '$RESOURCE_GROUP' does not exist. Please create it using:"
+              echo "  ./scripts/manage-resource-groups.sh create $env"
+              continue
+            fi
+            
+            # Create environment-specific directory
+            mkdir -p firewall-${env}
+            cp main-vwan-core.tf firewall-${env}/main.tf
+            cp variables.tf firewall-${env}/
+            
+            # Create backend configuration for this environment
+            cat > firewall-${env}/backend.tf << EOF
+          terraform {
+            backend "azurerm" {
+              resource_group_name  = "rg-vwan-terraform-state"
+              storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+              container_name       = "tfstate"
+              key                  = "firewall-${env}.tfstate"
+              use_oidc             = true
+            }
+          }
+          EOF
+            
+            # Generate terraform.tfvars from config.yml
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  vwan_core = config.get('vwan_core', {})
+                  firewall = vwan_core.get('firewall', {})
+                  
+                  tfvars = f'''client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"
+              tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"
+              subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"
+              environment = \"{config.get('environment', '$env')}\"
+              location = \"{config.get('region', 'eastus')}\"
+              '''
+                  
+                  with open('firewall-$env/terraform.tfvars', 'w') as f:
+                      f.write(tfvars)
+                      
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            
+            # Run terraform apply
+            cd firewall-${env}
+            terraform init -reconfigure
+            terraform apply -auto-approve -var-file="terraform.tfvars" -input=false
+            
+            cd ..
+          done
+
+  # Deploy VWAN Core Changes (for pushes to main)
   deploy-vwan-core:
     name: 'Deploy VWAN Core Changes'
-    needs: [analyze-changes, plan-vwan-core]
-    if: needs.analyze-changes.outputs.vwan_core_changed == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: analyze-changes
+    if: needs.analyze-changes.outputs.vwan_core_changed == 'true' && github.event_name == 'push'
     runs-on: ubuntu-latest
     environment: production
     
+    env:
+      TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    defaults:
+      run:
+        working-directory: ./terraform
+
     steps:
       - uses: actions/checkout@v4
       
-      - name: Deploy VWAN Core
-        run: |
-          echo "Deploying VWAN core changes..."
-          echo "This would contain the apply logic for VWAN core"
-          echo "based on the config.yml vwan_core section"
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.2"
+
+      - name: Setup Backend Storage
+        id: storage
+        run: |
+          RESOURCE_GROUP="rg-vwan-terraform-state"
+          STORAGE_ACCOUNT="sttfstatecencoraprod"
+          CONTAINER_NAME="tfstate"
+          LOCATION="eastus"
+
+          # Check if storage account exists, create if not
+          if ! az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
+            echo "Storage account $STORAGE_ACCOUNT does not exist. Please ensure the resource group exists first."
+            echo "You can create it using: ./scripts/manage-resource-groups.sh create tf-state"
+            exit 1
+          fi
+
+          # Create blob container if it doesn't exist
+          az storage container create \
+              --name $CONTAINER_NAME \
+              --account-name $STORAGE_ACCOUNT
+
+          echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
+
+      - name: Deploy VWAN Core Infrastructure
+        run: |
+          # Get changed environments
+          CHANGED_ENVS="${{ needs.analyze-changes.outputs.environments_changed }}"
+          
+          for env in ${CHANGED_ENVS//,/ }; do
+            echo "Deploying VWAN core for environment: $env"
+            
+            # Check if config file exists for this environment
+            if [ ! -f "config/$env/config.yml" ]; then
+              echo "Config file not found for environment: $env, skipping"
+              continue
+            fi
+            
+            # Parse config to check if VWAN core is enabled
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  vwan_core = config.get('vwan_core', {})
+                  if vwan_core.get('enabled', False):
+                      print('enabled')
+                  else:
+                      print('disabled')
+                      
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            > vwan_core_status_${env}.txt
+            
+            VWAN_CORE_STATUS=$(cat vwan_core_status_${env}.txt)
+            
+            if [ "$VWAN_CORE_STATUS" != "enabled" ]; then
+              echo "VWAN core is disabled for environment: $env, skipping"
+              continue
+            fi
+            
+            # Create environment-specific directory
+            mkdir -p vwan-core-${env}
+            cp main-vwan-core.tf vwan-core-${env}/main.tf
+            cp variables.tf vwan-core-${env}/
+            
+            # Create backend configuration for this environment
+            cat > vwan-core-${env}/backend.tf << EOF
+          terraform {
+            backend "azurerm" {
+              resource_group_name  = "rg-vwan-terraform-state"
+              storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+              container_name       = "tfstate"
+              key                  = "vwan-core-${env}.tfstate"
+              use_oidc             = true
+            }
+          }
+          EOF
+            
+            # Generate terraform.tfvars from config.yml
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  vwan_core = config.get('vwan_core', {})
+                  firewall = vwan_core.get('firewall', {})
+                  
+                  tfvars = f'''client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"
+              tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"
+              subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"
+              environment = \"{config.get('environment', '$env')}\"
+              location = \"{config.get('region', 'eastus')}\"
+              '''
+                  
+                  with open('vwan-core-$env/terraform.tfvars', 'w') as f:
+                      f.write(tfvars)
+                      
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            
+            # Run terraform apply
+            cd vwan-core-${env}
+            terraform init -reconfigure
+            terraform apply -auto-approve -var-file="terraform.tfvars" -input=false
+            
+            cd ..
+          done
+
+  # Deploy Hub Changes (for pushes to main)
   deploy-hubs:
     name: 'Deploy Hub Changes'
-    needs: [analyze-changes, plan-hubs]
-    if: needs.analyze-changes.outputs.hubs_changed == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [analyze-changes, deploy-vwan-core]
+    if: needs.analyze-changes.outputs.hubs_changed == 'true' && github.event_name == 'push'
     runs-on: ubuntu-latest
     environment: production
     
+    env:
+      TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    defaults:
+      run:
+        working-directory: ./terraform
+
     steps:
       - uses: actions/checkout@v4
       
-      - name: Deploy Hub Changes
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.2"
+
+      - name: Setup Backend Storage
+        id: storage
         run: |
-          echo "Deploying hub changes..."
-          echo "This would contain the apply logic for hubs"
-          echo "based on the config.yml hubs section" 
+          RESOURCE_GROUP="rg-vwan-terraform-state"
+          STORAGE_ACCOUNT="sttfstatecencoraprod"
+          CONTAINER_NAME="tfstate"
+          LOCATION="eastus"
+
+          # Check if storage account exists, create if not
+          if ! az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
+            echo "Storage account $STORAGE_ACCOUNT does not exist. Please ensure the resource group exists first."
+            echo "You can create it using: ./scripts/manage-resource-groups.sh create tf-state"
+            exit 1
+          fi
+
+          # Create blob container if it doesn't exist
+          az storage container create \
+              --name $CONTAINER_NAME \
+              --account-name $STORAGE_ACCOUNT
+
+          echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
+
+      - name: Deploy Hub Infrastructure
+        run: |
+          # Get changed environments
+          CHANGED_ENVS="${{ needs.analyze-changes.outputs.environments_changed }}"
+          
+          for env in ${CHANGED_ENVS//,/ }; do
+            echo "Deploying hubs for environment: $env"
+            
+            # Check if config file exists for this environment
+            if [ ! -f "config/$env/config.yml" ]; then
+              echo "Config file not found for environment: $env, skipping"
+              continue
+            fi
+            
+            # Parse config to get enabled hubs
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  hubs = config.get('hubs', {})
+                  enabled_hubs = []
+                  
+                  for hub_name, hub_config in hubs.items():
+                      if hub_config.get('enabled', False):
+                          enabled_hubs.append(hub_name)
+                  
+                  print(' '.join(enabled_hubs))
+                  
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            > enabled_hubs_${env}.txt
+            
+            ENABLED_HUBS=$(cat enabled_hubs_${env}.txt)
+            
+            if [ -z "$ENABLED_HUBS" ]; then
+              echo "No enabled hubs found for environment: $env"
+              continue
+            fi
+            
+            # Process each enabled hub
+            for hub in $ENABLED_HUBS; do
+              echo "Deploying hub: $hub for environment: $env"
+              
+              # Create a clean directory for this hub
+              mkdir -p hub-${env}-${hub}
+              cp variables.tf hub-${env}-${hub}/
+              cp main-hubs.tf hub-${env}-${hub}/main.tf
+              
+              # Create backend.tf file for this hub
+              cat > hub-${env}-${hub}/backend.tf << EOF
+            terraform {
+              backend "azurerm" {
+                resource_group_name  = "rg-vwan-terraform-state"
+                storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+                container_name       = "tfstate"
+                key                  = "${env}/${hub}.tfstate"
+                use_oidc             = true
+              }
+            }
+            EOF
+              
+              # Generate terraform.tfvars from config.yml
+              python3 -c |
+                import yaml
+                import sys
+                
+                try:
+                    with open('config/$env/config.yml', 'r') as f:
+                        config = yaml.safe_load(f)
+                    
+                    tfvars = f'''client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"
+                tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"
+                subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"
+                environment = \"{config.get('environment', '$env')}\"
+                hub_name = \"{hub}\"
+                location = \"{config.get('region', 'eastus')}\"
+                '''
+                    
+                    with open('hub-$env-$hub/terraform.tfvars', 'w') as f:
+                        f.write(tfvars)
+                        
+                except Exception as e:
+                    print(f'Error processing config for $env hub $hub: {e}')
+                    sys.exit(1)
+              
+              # Run terraform apply in the hub directory
+              cd hub-${env}-${hub}
+              terraform init -reconfigure
+              terraform apply -auto-approve -var-file="terraform.tfvars" -input=false
+              cd ..
+            done
+          done
+
+  # Deploy Spoke VNets (for pushes to main)
+  deploy-spoke-vnets:
+    name: 'Deploy Spoke VNets'
+    needs: [analyze-changes, deploy-hubs]
+    if: needs.analyze-changes.outputs.config_changed == 'true' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    env:
+      TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    defaults:
+      run:
+        working-directory: ./terraform
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.2"
+
+      - name: Setup Backend Storage
+        id: storage
+        run: |
+          RESOURCE_GROUP="rg-vwan-terraform-state"
+          STORAGE_ACCOUNT="sttfstatecencoraprod"
+          CONTAINER_NAME="tfstate"
+          LOCATION="eastus"
+
+          # Check if storage account exists, create if not
+          if ! az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
+            echo "Storage account $STORAGE_ACCOUNT does not exist. Please ensure the resource group exists first."
+            echo "You can create it using: ./scripts/manage-resource-groups.sh create tf-state"
+            exit 1
+          fi
+
+          # Create blob container if it doesn't exist
+          az storage container create \
+              --name $CONTAINER_NAME \
+              --account-name $STORAGE_ACCOUNT
+
+          echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
+
+      - name: Deploy Spoke VNet Infrastructure
+        run: |
+          # Get changed environments
+          CHANGED_ENVS="${{ needs.analyze-changes.outputs.environments_changed }}"
+          
+          for env in ${CHANGED_ENVS//,/ }; do
+            echo "Deploying spoke VNets for environment: $env"
+            
+            # Check if config file exists for this environment
+            if [ ! -f "config/$env/config.yml" ]; then
+              echo "Config file not found for environment: $env, skipping"
+              continue
+            fi
+            
+            # Parse config to check if spoke VNets are configured
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  spoke_vnets = config.get('spoke_vnets', {})
+                  if spoke_vnets:
+                      print('enabled')
+                  else:
+                      print('disabled')
+                      
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            > spoke_vnets_status_${env}.txt
+            
+            SPOKE_VNETS_STATUS=$(cat spoke_vnets_status_${env}.txt)
+            
+            if [ "$SPOKE_VNETS_STATUS" != "enabled" ]; then
+              echo "No spoke VNets configured for environment: $env, skipping"
+              continue
+            fi
+            
+            # Create environment-specific directory
+            mkdir -p spoke-vnets-${env}
+            cp main-spoke-vnets.tf spoke-vnets-${env}/main.tf
+            cp variables.tf spoke-vnets-${env}/
+            
+            # Create backend configuration for this environment
+            cat > spoke-vnets-${env}/backend.tf << EOF
+          terraform {
+            backend "azurerm" {
+              resource_group_name  = "rg-vwan-terraform-state"
+              storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+              container_name       = "tfstate"
+              key                  = "spoke-vnets-${env}.tfstate"
+              use_oidc             = true
+            }
+          }
+          EOF
+            
+            # Generate terraform.tfvars from config.yml
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  tfvars = f'''client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"
+              tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"
+              subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"
+              environment = \"{config.get('environment', '$env')}\"
+              location = \"{config.get('region', 'eastus')}\"
+              '''
+                  
+                  with open('spoke-vnets-$env/terraform.tfvars', 'w') as f:
+                      f.write(tfvars)
+                      
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            
+            # Run terraform apply
+            cd spoke-vnets-${env}
+            terraform init -reconfigure
+            terraform apply -auto-approve -var-file="terraform.tfvars" -input=false
+            
+            cd ..
+          done

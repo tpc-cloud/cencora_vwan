@@ -11,22 +11,27 @@ LOCATION=$1
 ENVIRONMENT=$2
 
 # Set variables
-RESOURCE_GROUP="rg-terraform-state"
-STORAGE_ACCOUNT="stterraformstate${ENVIRONMENT}"
+RESOURCE_GROUP="rg-vwan-terraform-state"
+STORAGE_ACCOUNT="sttfstatecencoraprod"
 CONTAINER_NAME="tfstate"
 
 # Create resource group if it doesn't exist
 echo "Creating resource group $RESOURCE_GROUP..."
 az group create --name $RESOURCE_GROUP --location $LOCATION
 
-# Create storage account if it doesn't exist
-echo "Creating storage account $STORAGE_ACCOUNT..."
-az storage account create \
-    --name $STORAGE_ACCOUNT \
-    --resource-group $RESOURCE_GROUP \
-    --location $LOCATION \
-    --sku Standard_LRS \
-    --encryption-services blob
+# Check if storage account already exists
+if az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
+    echo "Storage account $STORAGE_ACCOUNT already exists, skipping creation"
+else
+    # Create storage account if it doesn't exist
+    echo "Creating storage account $STORAGE_ACCOUNT..."
+    az storage account create \
+        --name $STORAGE_ACCOUNT \
+        --resource-group $RESOURCE_GROUP \
+        --location $LOCATION \
+        --sku Standard_LRS \
+        --encryption-services blob
+fi
 
 # Create blob container if it doesn't exist
 echo "Creating blob container $CONTAINER_NAME..."
@@ -45,4 +50,6 @@ STORAGE_KEY=$(az storage account keys list \
 echo "Backend storage setup complete!"
 echo "Storage Account: $STORAGE_ACCOUNT"
 echo "Container: $CONTAINER_NAME"
-echo "Resource Group: $RESOURCE_GROUP" 
+echo "Resource Group: $RESOURCE_GROUP"
+echo ""
+echo "You can now run your Terraform commands with the backend configured." 

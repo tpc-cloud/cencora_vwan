@@ -1,4 +1,4 @@
-name: 'Terraform Virtual WAN Hubs'
+name: 'Deploy Virtual WAN Hub'
 
 on:
   pull_request:
@@ -11,6 +11,21 @@ on:
       - main
     paths:
       - 'terraform/config/**/config.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'prod'
+        type: choice
+        options:
+          - prod
+          - dev
+          - staging
+      hub_name:
+        description: 'Hub name to deploy'
+        required: true
+        type: string
 
 permissions:
   id-token: write
@@ -27,10 +42,10 @@ jobs:
     name: 'Inspect Configuration Changes'
     runs-on: ubuntu-latest
     outputs:
-      vwan_core_changed: ${{ steps.check-diff.outputs.vwan_core_changed }}
       hubs_changed: ${{ steps.check-diff.outputs.hubs_changed }}
       config_changed: ${{ steps.check-diff.outputs.config_changed }}
       environments_changed: ${{ steps.check-diff.outputs.environments_changed }}
+      manual_trigger: ${{ steps.check-diff.outputs.manual_trigger }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,6 +54,16 @@ jobs:
       - name: Check config.yml changes
         id: check-diff
         run: |
+          # Check if this is a manual workflow dispatch
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual workflow dispatch detected for environment: ${{ github.event.inputs.environment }} and hub: ${{ github.event.inputs.hub_name }}"
+            echo "hubs_changed=true" >> $GITHUB_OUTPUT
+            echo "config_changed=true" >> $GITHUB_OUTPUT
+            echo "environments_changed=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+            echo "manual_trigger=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
           # Get the diff of config.yml files between the current and previous commit
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             # For PRs, compare with base branch
@@ -52,13 +77,7 @@ jobs:
           echo "Config diff:"
           cat config_diff.txt || echo "No diff found or file doesn't exist"
           
-          # Check for changes in specific sections across all environment configs
-          if grep -E '^\+[[:space:]]*vwan_core:' config_diff.txt || grep -E '^-.*vwan_core:' config_diff.txt; then
-            echo "vwan_core_changed=true" >> $GITHUB_OUTPUT
-          else
-            echo "vwan_core_changed=false" >> $GITHUB_OUTPUT
-          fi
-          
+          # Check for changes in hubs section across all environment configs
           if grep -E '^\+[[:space:]]*hubs:' config_diff.txt || grep -E '^-.*hubs:' config_diff.txt; then
             echo "hubs_changed=true" >> $GITHUB_OUTPUT
           else
@@ -80,16 +99,18 @@ jobs:
             echo "environments_changed=" >> $GITHUB_OUTPUT
           fi
           
+          echo "manual_trigger=false" >> $GITHUB_OUTPUT
+          
           echo "Changes detected:"
-          echo "  VWAN Core: ${{ steps.check-diff.outputs.vwan_core_changed }}"
           echo "  Hubs: ${{ steps.check-diff.outputs.hubs_changed }}"
           echo "  Config: ${{ steps.check-diff.outputs.config_changed }}"
           echo "  Environments: ${{ steps.check-diff.outputs.environments_changed }}"
+          echo "  Manual Trigger: ${{ steps.check-diff.outputs.manual_trigger }}"
 
   terraform-plan:
-    name: 'Terraform Plan'
+    name: 'Terraform Plan Virtual Hub'
     needs: inspect-config
-    if: needs.inspect-config.outputs.config_changed == 'true' && github.event_name == 'pull_request'
+    if: (needs.inspect-config.outputs.hubs_changed == 'true' && github.event_name == 'pull_request') || needs.inspect-config.outputs.manual_trigger == 'true'
     runs-on: ubuntu-latest
     environment: production
 
@@ -122,7 +143,7 @@ jobs:
       id: storage
       run: |
         # Set variables
-        RESOURCE_GROUP="rg-tf-state"
+        RESOURCE_GROUP="rg-vwan-terraform-state"
         STORAGE_ACCOUNT="sttfstatecencoraprod"
         CONTAINER_NAME="tfstate"
         LOCATION="eastus"
@@ -157,12 +178,20 @@ jobs:
     - name: Run Terraform Plan
       id: plan
       run: |
-        # Get changed environments
-        CHANGED_ENVS="${{ needs.inspect-config.outputs.environments_changed }}"
-        PLAN_OUTPUT=""
+        # Determine which environments to process
+        if [ "${{ needs.inspect-config.outputs.manual_trigger }}" = "true" ]; then
+          # Manual trigger - use the specified environment
+          ENVIRONMENTS="${{ github.event.inputs.environment }}"
+        else
+          # Automatic trigger - use changed environments
+          ENVIRONMENTS="${{ needs.inspect-config.outputs.environments_changed }}"
+        fi
         
-        for env in ${CHANGED_ENVS//,/ }; do
-          echo "Planning for environment: $env"
+        PLAN_OUTPUT=""
+        PLANNED_HUBS=""
+        
+        for env in ${ENVIRONMENTS//,/ }; do
+          echo "Planning hubs for environment: $env"
           
           # Check if config file exists for this environment
           if [ ! -f "config/$env/config.yml" ]; then
@@ -212,6 +241,13 @@ jobs:
           for hub in $ENABLED_HUBS; do
             echo "Planning hub: $hub for environment: $env"
             
+            # Add to planned hubs list
+            if [ -n "$PLANNED_HUBS" ]; then
+              PLANNED_HUBS="$PLANNED_HUBS, $env:$hub"
+            else
+              PLANNED_HUBS="$env:$hub"
+            fi
+            
             # Create a clean directory for this hub
             mkdir -p hub-${env}-${hub}
             cp variables.tf hub-${env}-${hub}/
@@ -221,7 +257,7 @@ jobs:
             cat > hub-${env}-${hub}/backend.tf << EOF
           terraform {
             backend "azurerm" {
-              resource_group_name  = "rg-tf-state"
+              resource_group_name  = "rg-vwan-terraform-state"
               storage_account_name = "${{ steps.storage.outputs.storage_account }}"
               container_name       = "tfstate"
               key                  = "${env}/${hub}.tfstate"
@@ -268,22 +304,25 @@ jobs:
           done
         done
         
-        # Save plan output for comment
         PLAN_OUTPUT=$(cat plan_output.txt)
         echo "plan_output<<EOF" >> $GITHUB_OUTPUT
         echo "$PLAN_OUTPUT" >> $GITHUB_OUTPUT
         echo "EOF" >> $GITHUB_OUTPUT
+        
+        echo "planned_hubs=$PLANNED_HUBS" >> $GITHUB_OUTPUT
 
-    - name: Comment Plan Output
+    - name: Comment Plan Results
+      if: github.event_name == 'pull_request'
       uses: actions/github-script@v7
       with:
         script: |
-          const output = `## Terraform Plan Results
+          const output = `## Virtual Hub Infrastructure Plan Results
           
+          **Component:** Virtual WAN Hubs
           **PR:** #${context.payload.pull_request.number}
           **Branch:** ${context.payload.pull_request.head.ref}
           **Commit:** ${context.sha}
-          **Environments:** ${process.env.CHANGED_ENVIRONMENTS}
+          **Hubs:** ${process.env.PLANNED_HUBS}
           
           \`\`\`
           ${process.env.PLAN_OUTPUT}
@@ -298,12 +337,12 @@ jobs:
           });
       env:
         PLAN_OUTPUT: ${{ steps.plan.outputs.plan_output }}
-        CHANGED_ENVIRONMENTS: ${{ needs.inspect-config.outputs.environments_changed }}
+        PLANNED_HUBS: ${{ steps.plan.outputs.planned_hubs }}
 
   terraform-apply:
-    name: 'Terraform Apply'
+    name: 'Terraform Apply Virtual Hub'
     needs: [inspect-config, terraform-plan]
-    if: needs.inspect-config.outputs.config_changed == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (needs.inspect-config.outputs.hubs_changed == 'true' && github.event_name == 'push') || needs.inspect-config.outputs.manual_trigger == 'true'
     runs-on: ubuntu-latest
     environment: production
 
@@ -336,7 +375,7 @@ jobs:
       id: storage
       run: |
         # Set variables
-        RESOURCE_GROUP="rg-tf-state"
+        RESOURCE_GROUP="rg-vwan-terraform-state"
         STORAGE_ACCOUNT="sttfstatecencoraprod"
         CONTAINER_NAME="tfstate"
         LOCATION="eastus"
@@ -368,17 +407,31 @@ jobs:
         # Save storage account name for later steps
         echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
 
-    - name: Terraform Apply
+    - name: Run Terraform Apply
       run: |
-        # Get changed environments
-        CHANGED_ENVS="${{ needs.inspect-config.outputs.environments_changed }}"
+        # Determine which environments to process
+        if [ "${{ needs.inspect-config.outputs.manual_trigger }}" = "true" ]; then
+          # Manual trigger - use the specified environment
+          ENVIRONMENTS="${{ github.event.inputs.environment }}"
+        else
+          # Automatic trigger - use changed environments
+          ENVIRONMENTS="${{ needs.inspect-config.outputs.environments_changed }}"
+        fi
         
-        for env in ${CHANGED_ENVS//,/ }; do
-          echo "Applying for environment: $env"
+        for env in ${ENVIRONMENTS//,/ }; do
+          echo "Applying hubs for environment: $env"
           
           # Check if config file exists for this environment
           if [ ! -f "config/$env/config.yml" ]; then
             echo "Config file not found for environment: $env, skipping"
+            continue
+          fi
+          
+          # Check if resource group exists
+          RESOURCE_GROUP="rg-vwan-${env}"
+          if ! az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+            echo "Resource group '$RESOURCE_GROUP' does not exist. Please create it using:"
+            echo "  ./scripts/manage-resource-groups.sh create $env"
             continue
           fi
           
@@ -425,7 +478,7 @@ jobs:
             cat > hub-${env}-${hub}/backend.tf << EOF
           terraform {
             backend "azurerm" {
-              resource_group_name  = "rg-tf-state"
+              resource_group_name  = "rg-vwan-terraform-state"
               storage_account_name = "${{ steps.storage.outputs.storage_account }}"
               container_name       = "tfstate"
               key                  = "${env}/${hub}.tfstate"
@@ -462,24 +515,9 @@ jobs:
             cd hub-${env}-${hub}
             terraform init -reconfigure
             
-            # Check if Virtual Hub exists and import it if needed
-            echo "Checking if Virtual Hub exists for ${hub} in environment ${env}..."
-            HUB_NAME="${hub}-${env}"
-            RESOURCE_GROUP="rg-vwan-${env}"
-            if az network vhub show --name "$HUB_NAME" --resource-group "$RESOURCE_GROUP" >/dev/null 2>&1; then
-              echo "Virtual Hub exists, checking if already in Terraform state..."
-              # Check if resource is already in state
-              if terraform state list | grep -q "azurerm_virtual_hub.hub"; then
-                echo "Virtual Hub already in Terraform state, skipping import"
-              else
-                echo "Virtual Hub exists but not in state, importing into Terraform state..."
-                terraform import azurerm_virtual_hub.hub "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Network/virtualHubs/$HUB_NAME" || echo "Import failed or resource already in state"
-              fi
-            else
-              echo "Virtual Hub does not exist, will be created by Terraform"
-            fi
+            # Run terraform apply
+            terraform apply -auto-approve -var-file="terraform.tfvars" -input=false
             
-            terraform apply -auto-approve -var-file="terraform.tfvars" -input=false -lock=false
             cd ..
           done
         done 

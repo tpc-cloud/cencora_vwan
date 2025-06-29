@@ -1,0 +1,448 @@
+name: Deploy Firewall Infrastructure
+
+on:
+  workflow_call:
+    inputs:
+      environments_changed:
+        required: true
+        type: string
+      pr_number:
+        required: false
+        type: string
+      branch:
+        required: false
+        type: string
+      commit_sha:
+        required: false
+        type: string
+    secrets:
+      AZURE_CLIENT_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+      AZURE_SUBSCRIPTION_ID:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  ARM_CLIENT_ID: "${{ secrets.AZURE_CLIENT_ID }}"
+  ARM_SUBSCRIPTION_ID: "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+  ARM_TENANT_ID: "${{ secrets.AZURE_TENANT_ID }}"
+
+jobs:
+  plan-firewall:
+    name: 'Plan Firewall Changes'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    env:
+      TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    defaults:
+      run:
+        working-directory: ./terraform
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.2"
+
+      - name: Setup Backend Storage
+        id: storage
+        run: |
+          RESOURCE_GROUP="rg-vwan-terraform-state"
+          STORAGE_ACCOUNT="sttfstatecencoraprod"
+          CONTAINER_NAME="tfstate"
+          LOCATION="eastus"
+
+          # Check if storage account exists, create if not
+          if ! az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
+            echo "Storage account $STORAGE_ACCOUNT does not exist. Please ensure the resource group exists first."
+            echo "You can create it using: ./scripts/manage-resource-groups.sh create tf-state"
+            exit 1
+          fi
+
+          # Create blob container if it doesn't exist
+          az storage container create \
+              --name $CONTAINER_NAME \
+              --account-name $STORAGE_ACCOUNT
+
+          echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
+
+      - name: Plan Firewall Infrastructure
+        id: plan
+        run: |
+          # Get changed environments
+          CHANGED_ENVS="${{ inputs.environments_changed }}"
+          PLAN_OUTPUT=""
+          PLANNED_ENVIRONMENTS=""
+          
+          for env in ${CHANGED_ENVS//,/ }; do
+            echo "Planning firewall for environment: $env"
+            
+            # Check if config file exists for this environment
+            if [ ! -f "config/$env/config.yml" ]; then
+              echo "Config file not found for environment: $env, skipping"
+              continue
+            fi
+            
+            # Parse config to check if firewall is enabled in VWAN core
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  vwan_core = config.get('vwan_core', {})
+                  firewall = vwan_core.get('firewall', {})
+                  if firewall.get('enabled', False):
+                      print('enabled')
+                  else:
+                      print('disabled')
+                      
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            > firewall_status_${env}.txt
+            
+            FIREWALL_STATUS=$(cat firewall_status_${env}.txt)
+            
+            if [ "$FIREWALL_STATUS" != "enabled" ]; then
+              echo "Firewall is disabled for environment: $env, skipping"
+              continue
+            fi
+            
+            # Check if resource group exists
+            RESOURCE_GROUP="rg-vwan-${env}"
+            if ! az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+              echo "Resource group '$RESOURCE_GROUP' does not exist. Please create it using:"
+              echo "  ./scripts/manage-resource-groups.sh create $env"
+              continue
+            fi
+            
+            # Add to planned environments list
+            if [ -n "$PLANNED_ENVIRONMENTS" ]; then
+              PLANNED_ENVIRONMENTS="$PLANNED_ENVIRONMENTS, $env"
+            else
+              PLANNED_ENVIRONMENTS="$env"
+            fi
+            
+            # Create environment-specific directory
+            mkdir -p firewall-${env}
+            cp main-vwan-core.tf firewall-${env}/main.tf
+            cp variables.tf firewall-${env}/
+            
+            # Create backend configuration for this environment
+            cat > firewall-${env}/backend.tf << EOF
+          terraform {
+            backend "azurerm" {
+              resource_group_name  = "rg-vwan-terraform-state"
+              storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+              container_name       = "tfstate"
+              key                  = "firewall-${env}.tfstate"
+              use_oidc             = true
+            }
+          }
+          EOF
+            
+            # Generate terraform.tfvars from config.yml
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  vwan_core = config.get('vwan_core', {})
+                  firewall = vwan_core.get('firewall', {})
+                  
+                  tfvars = f'''client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"
+              tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"
+              subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"
+              environment = \"{config.get('environment', '$env')}\"
+              location = \"{config.get('region', 'eastus')}\"
+              '''
+                  
+                  with open('firewall-$env/terraform.tfvars', 'w') as f:
+                      f.write(tfvars)
+                      
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            
+            # Run terraform plan
+            cd firewall-${env}
+            terraform init -reconfigure
+            terraform plan -no-color -var-file="terraform.tfvars" -input=false -detailed-exitcode >> ../plan_output.txt 2>&1 || echo "Plan completed with exit code $?" >> ../plan_output.txt
+            
+            echo "" >> ../plan_output.txt
+            echo "--- Environment: $env ---" >> ../plan_output.txt
+            echo "" >> ../plan_output.txt
+            
+            cd ..
+          done
+          
+          PLAN_OUTPUT=$(cat plan_output.txt)
+          echo "plan_output<<EOF" >> $GITHUB_OUTPUT
+          echo "$PLAN_OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          echo "planned_environments=$PLANNED_ENVIRONMENTS" >> $GITHUB_OUTPUT
+
+      - name: Comment Firewall Plan Results
+        if: inputs.pr_number != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `## Firewall Infrastructure Plan Results
+            
+            **Component:** Azure Firewall
+            **PR:** #${process.env.PR_NUMBER}
+            **Branch:** ${process.env.BRANCH}
+            **Commit:** ${process.env.COMMIT_SHA}
+            **Environments:** ${process.env.PLANNED_ENVIRONMENTS}
+            
+            \`\`\`
+            ${process.env.PLAN_OUTPUT}
+            \`\`\`
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: parseInt(process.env.PR_NUMBER),
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+        env:
+          PLAN_OUTPUT: ${{ steps.plan.outputs.plan_output }}
+          PLANNED_ENVIRONMENTS: ${{ steps.plan.outputs.planned_environments }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          BRANCH: ${{ inputs.branch }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+
+      # TODO: Uncomment when ServiceNow integration is available
+      # - name: Update ServiceNow with Firewall Plan Results
+      #   uses: actions/github-script@v7
+      #   with:
+      #     script: |
+      #       // ServiceNow API integration for plan results
+      #       const servicenowUrl = process.env.SERVICENOW_URL;
+      #       const servicenowUsername = process.env.SERVICENOW_USERNAME;
+      #       const servicenowPassword = process.env.SERVICENOW_PASSWORD;
+      #       
+      #       if (!servicenowUrl || !servicenowUsername || !servicenowPassword) {
+      #         console.log('ServiceNow credentials not configured, skipping update');
+      #         return;
+      #       }
+      #       
+      #       const planData = {
+      #         component: 'Azure Firewall',
+      #         pr_number: process.env.PR_NUMBER,
+      #         branch: process.env.BRANCH,
+      #         commit: process.env.COMMIT_SHA,
+      #         environments: process.env.PLANNED_ENVIRONMENTS,
+      #         plan_output: process.env.PLAN_OUTPUT,
+      #         status: 'plan_completed',
+      #         timestamp: new Date().toISOString()
+      #       };
+      #       
+      #       try {
+      #         const response = await fetch(`${servicenowUrl}/api/now/table/change_request`, {
+      #           method: 'POST',
+      #           headers: {
+      #             'Content-Type': 'application/json',
+      #             'Authorization': 'Basic ' + Buffer.from(`${servicenowUsername}:${servicenowPassword}`).toString('base64')
+      #           },
+      #           body: JSON.stringify(planData)
+      #         });
+      #         
+      #         if (response.ok) {
+      #           console.log('ServiceNow update successful');
+      #         } else {
+      #           console.log('ServiceNow update failed:', response.statusText);
+      #         }
+      #       } catch (error) {
+      #         console.log('ServiceNow update error:', error.message);
+      #       }
+      #   env:
+      #     PLAN_OUTPUT: ${{ steps.plan.outputs.plan_output }}
+      #     PLANNED_ENVIRONMENTS: ${{ steps.plan.outputs.planned_environments }}
+      #     PR_NUMBER: ${{ inputs.pr_number }}
+      #     BRANCH: ${{ inputs.branch }}
+      #     COMMIT_SHA: ${{ inputs.commit_sha }}
+      #     SERVICENOW_URL: ${{ secrets.SERVICENOW_URL }}
+      #     SERVICENOW_USERNAME: ${{ secrets.SERVICENOW_USERNAME }}
+      #     SERVICENOW_PASSWORD: ${{ secrets.SERVICENOW_PASSWORD }}
+
+  deploy-firewall:
+    name: 'Deploy Firewall Changes'
+    needs: plan-firewall
+    runs-on: ubuntu-latest
+    environment: production
+    
+    env:
+      TF_VAR_client_id: ${{ secrets.AZURE_CLIENT_ID }}
+      TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    defaults:
+      run:
+        working-directory: ./terraform
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.12.2"
+
+      - name: Setup Backend Storage
+        id: storage
+        run: |
+          RESOURCE_GROUP="rg-vwan-terraform-state"
+          STORAGE_ACCOUNT="sttfstatecencoraprod"
+          CONTAINER_NAME="tfstate"
+          LOCATION="eastus"
+
+          # Check if storage account exists, create if not
+          if ! az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP >/dev/null 2>&1; then
+            echo "Storage account $STORAGE_ACCOUNT does not exist. Please ensure the resource group exists first."
+            echo "You can create it using: ./scripts/manage-resource-groups.sh create tf-state"
+            exit 1
+          fi
+
+          # Create blob container if it doesn't exist
+          az storage container create \
+              --name $CONTAINER_NAME \
+              --account-name $STORAGE_ACCOUNT
+
+          echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
+
+      - name: Deploy Firewall Infrastructure
+        run: |
+          # Get changed environments
+          CHANGED_ENVS="${{ inputs.environments_changed }}"
+          
+          for env in ${CHANGED_ENVS//,/ }; do
+            echo "Deploying firewall for environment: $env"
+            
+            # Check if config file exists for this environment
+            if [ ! -f "config/$env/config.yml" ]; then
+              echo "Config file not found for environment: $env, skipping"
+              continue
+            fi
+            
+            # Parse config to check if firewall is enabled in VWAN core
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  vwan_core = config.get('vwan_core', {})
+                  firewall = vwan_core.get('firewall', {})
+                  if firewall.get('enabled', False):
+                      print('enabled')
+                  else:
+                      print('disabled')
+                      
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            > firewall_status_${env}.txt
+            
+            FIREWALL_STATUS=$(cat firewall_status_${env}.txt)
+            
+            if [ "$FIREWALL_STATUS" != "enabled" ]; then
+              echo "Firewall is disabled for environment: $env, skipping"
+              continue
+            fi
+            
+            # Check if resource group exists
+            RESOURCE_GROUP="rg-vwan-${env}"
+            if ! az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+              echo "Resource group '$RESOURCE_GROUP' does not exist. Please create it using:"
+              echo "  ./scripts/manage-resource-groups.sh create $env"
+              continue
+            fi
+            
+            # Create environment-specific directory
+            mkdir -p firewall-${env}
+            cp main-vwan-core.tf firewall-${env}/main.tf
+            cp variables.tf firewall-${env}/
+            
+            # Create backend configuration for this environment
+            cat > firewall-${env}/backend.tf << EOF
+          terraform {
+            backend "azurerm" {
+              resource_group_name  = "rg-vwan-terraform-state"
+              storage_account_name = "${{ steps.storage.outputs.storage_account }}"
+              container_name       = "tfstate"
+              key                  = "firewall-${env}.tfstate"
+              use_oidc             = true
+            }
+          }
+          EOF
+            
+            # Generate terraform.tfvars from config.yml
+            python3 -c |
+              import yaml
+              import sys
+              
+              try:
+                  with open('config/$env/config.yml', 'r') as f:
+                      config = yaml.safe_load(f)
+                  
+                  vwan_core = config.get('vwan_core', {})
+                  firewall = vwan_core.get('firewall', {})
+                  
+                  tfvars = f'''client_id = \"${{ secrets.AZURE_CLIENT_ID }}\"
+              tenant_id = \"${{ secrets.AZURE_TENANT_ID }}\"
+              subscription_id = \"${{ secrets.AZURE_SUBSCRIPTION_ID }}\"
+              environment = \"{config.get('environment', '$env')}\"
+              location = \"{config.get('region', 'eastus')}\"
+              '''
+                  
+                  with open('firewall-$env/terraform.tfvars', 'w') as f:
+                      f.write(tfvars)
+                      
+              except Exception as e:
+                  print(f'Error processing config for $env: {e}')
+                  sys.exit(1)
+            
+            # Run terraform apply
+            cd firewall-${env}
+            terraform init -reconfigure
+            terraform apply -auto-approve -var-file="terraform.tfvars" -input=false
+            
+            cd ..
+          done 
